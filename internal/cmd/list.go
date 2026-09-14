@@ -64,7 +64,6 @@ func init() {
 	listCmd.Flags().StringVar(&groupFlag, "group", "", "Show only ports in this `group`")
 	listCmd.Flags().StringVar(&sessionFlag, "session", "",
 		"Show only the ports an agent `session` started (`current` is this shell's own)")
-	listCmd.Flags().StringVar(&tagFlag, "tag", "", "Alias of --group, kept for one release")
 	listCmd.Flags().BoolVar(&treeFlag, "tree", false, "Group the ports into a tree instead of a table")
 	listCmd.MarkFlagsMutuallyExclusive("ipv4", "ipv6")
 	rootCmd.AddCommand(listCmd)
@@ -78,9 +77,6 @@ func listRun(cmd *cobra.Command, args []string) error {
 	group := groupFlag
 	if group == "" {
 		group = tagFlag
-	}
-	if tagFlag != "" {
-		Hint(cmd, HintTagToGroup("list", tagFlag))
 	}
 	ipVersion := ""
 	if ipv4Flag {

@@ -8,7 +8,6 @@ import (
 	"github.com/raskrebs/sonar/internal/daemon/client"
 	"github.com/raskrebs/sonar/internal/daemon/rpc"
 	"github.com/raskrebs/sonar/internal/killer"
-	"github.com/raskrebs/sonar/internal/ports"
 )
 
 // killThroughDaemon runs `sonar kill` as `ports.kill` / `groups.kill`.
@@ -184,60 +183,4 @@ func killSession(ctx context.Context) error {
 		return cliError(err)
 	}
 	return reportKill(os.Stdout, results, snapshot, killJSONFlag, killDryRunFlag)
-}
-
-// killSweepThroughDaemon is what `kill-all` and `down` do when they are pointed
-// at another machine: the same target selection they always do, against that
-// host's port table, killed by that host's daemon. Locally they still kill
-// directly — they are aliases of `sonar kill`, and a machine with no daemon
-// running must keep working (contract §20).
-func killSweepThroughDaemon(ctx context.Context, selectTargets func([]ports.ListeningPort) ([]killer.Target, error),
-	opts killer.Options, confirm, asJSON bool) error {
-	c, err := connectForHostWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	snapshot, err := hostSnapshot(ctx, c)
-	if err != nil {
-		return cliError(err)
-	}
-	targets, err := selectTargets(snapshot)
-	if err != nil {
-		return err
-	}
-	if len(targets) == 0 {
-		fmt.Println("No matching ports found.")
-		return nil
-	}
-
-	selectors := killSelectors(targets)
-	call := func(dryRun bool) ([]killer.Result, error) {
-		var env rpc.KillEnvelope
-		err := c.Call(ctx, "ports.kill", rpc.PortsKillParams{
-			HostParams: hostParams(),
-			Targets:    selectors,
-			Force:      opts.Force,
-			GraceMs:    graceMs(opts),
-			DryRun:     dryRun,
-		}, &env)
-		return env.Results, err
-	}
-
-	if confirm {
-		plan, err := call(true)
-		if err != nil {
-			return cliError(err)
-		}
-		if !confirmPlan(plan, snapshot) {
-			fmt.Println("Aborted.")
-			return nil
-		}
-	}
-	results, err := call(false)
-	if err != nil {
-		return cliError(err)
-	}
-	return reportKill(os.Stdout, results, snapshot, asJSON, false)
 }

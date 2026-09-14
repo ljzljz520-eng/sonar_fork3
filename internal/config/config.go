@@ -235,8 +235,6 @@ const template = `# sonar configuration
 #                  (default: sonar.db next to this file)
 #   SONAR_SOCKET   path the daemon listens on and every client dials
 #                  (default: what 'sonar daemon path' prints)
-#   SONAR_NO_HINTS set to 1 to silence the migration notices the renamed
-#                  commands print
 #   SONAR_NO_AUTOSTART
 #                  set to 1 to stop clients starting a daemon that is not
 #                  already running; they report it as unavailable instead

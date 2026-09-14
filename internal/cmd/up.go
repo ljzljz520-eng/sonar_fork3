@@ -2,18 +2,15 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/raskrebs/sonar/internal/daemon/client"
 	"github.com/raskrebs/sonar/internal/daemon/rpc"
 	"github.com/raskrebs/sonar/internal/display"
 	"github.com/raskrebs/sonar/internal/groups"
-	"github.com/raskrebs/sonar/internal/profile"
 	"github.com/spf13/cobra"
 
 	// The daemon serves groups.start from this package's init(); `sonar serve`
@@ -63,7 +60,7 @@ func upRun(cmd *cobra.Command, args []string) error {
 	var start rpc.GroupsStartResult
 	stream, err := c.Stream(cmd.Context(), "groups.start", params, &start)
 	if err != nil {
-		return upError(cmd, args, err)
+		return daemonError(err)
 	}
 	defer stream.Close()
 
@@ -183,36 +180,6 @@ func printStartSummary(end rpc.GroupsStartEnd) {
 		parts = append(parts, display.Red(fmt.Sprintf("%d failed", len(end.Errors))))
 	}
 	fmt.Printf("\n%s\n", display.Dim(strings.Join(parts, ", ")))
-}
-
-// upError adds the migration notice for the old `sonar up <profile>`: profiles
-// are gone from this command, and someone whose muscle memory still types it
-// should be told where they went rather than just "no group".
-//
-// It goes through Hint, the one notice mechanism the aliases share (§23), so it
-// is a single stderr line, printed at most once, and silenced by --json and by
-// SONAR_NO_HINTS like every other migration notice.
-func upError(cmd *cobra.Command, args []string, err error) error {
-	out := daemonError(err)
-	var re *rpc.Error
-	if len(args) != 1 || !errors.As(err, &re) || re.Data.Code != "not_found" {
-		return out
-	}
-	if hasProfile(args[0]) {
-		Hint(cmd, HintUpProfile(args[0]))
-	}
-	return out
-}
-
-// hasProfile reports whether a name still exists as a profile. An unreadable
-// profile directory is simply "no profile": the notice is a courtesy, not a
-// reason to fail differently.
-func hasProfile(name string) bool {
-	names, err := profile.List()
-	if err != nil {
-		return false
-	}
-	return slices.Contains(names, name)
 }
 
 // shortPath renders a path under the home directory as ~/….
