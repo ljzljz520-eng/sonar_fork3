@@ -12,6 +12,7 @@ func TestPromptCarriesWhatSonarKnows(t *testing.T) {
 		Legacy:     "/code/shop/.sonar.yaml",
 		Listening:  []string{"5173  vite (v5.4)", "8000  uvicorn app:app"},
 		Draft:      "name: shop\nservices: []\n",
+		Sonar:      "/opt/homebrew/bin/sonar",
 		HasSkill:   true,
 	})
 	if err != nil {
@@ -25,6 +26,8 @@ func TestPromptCarriesWhatSonarKnows(t *testing.T) {
 		"${api.url}",
 		"port: auto",
 		"`sonar` skill is installed",
+		"/opt/homebrew/bin/sonar groups",
+		"/opt/homebrew/bin/sonar doctor",
 		"Do not start, stop or kill anything",
 	} {
 		if !strings.Contains(got, want) {

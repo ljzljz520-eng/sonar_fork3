@@ -69,8 +69,11 @@ with `port: auto` is given `PORT` and `SONAR_PORT` in its environment as well.
 4. Where a service needs another's address, use `${other.port}` or
    `${other.url}` in `env:` instead of a hard-coded `localhost:8080`.
 5. Order with `depends_on` where one service genuinely needs another listening.
-6. Write the file, then check it: `sonar groups` lists what the file declares,
-   and `sonar doctor` reports a file that does not load.
+6. Write the file, then check it with the binary that started you — the
+   `sonar` on PATH may be an older release that does not know this format:
+
+   - `{{.Sonar}} groups` lists what the file declares
+   - `{{.Sonar}} doctor` reports a file that does not load
 {{- if .HasSkill}}
 7. The `sonar` skill is installed here and documents the rest of the tool.
 {{- end}}

@@ -33,6 +33,7 @@ func runInitAgent(cmd *cobra.Command, root string, cfg *groups.Config, live []po
 		Legacy:     legacyConfig(root),
 		Listening:  listeningLines(root, live),
 		Draft:      withoutHeader(string(draft)),
+		Sonar:      sonarBinary(),
 		HasSkill:   skillInstalled(root),
 	})
 	if err != nil {
@@ -115,6 +116,19 @@ func splitAgentArgs(cmd *cobra.Command, args []string) (string, []string, error)
 		name = before[0]
 	}
 	return name, extra, nil
+}
+
+// sonarBinary is this executable, for the checks the prompt asks the agent to
+// run. A binary that cannot name itself falls back to whatever `sonar` means
+// on PATH, which is better than nothing.
+func sonarBinary() string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	return "sonar"
 }
 
 // legacyConfig is an older `.sonar.yaml` in this project, so the prompt can

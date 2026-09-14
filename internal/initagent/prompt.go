@@ -24,6 +24,11 @@ type Context struct {
 	Listening []string
 	// Draft is the YAML sonar would have written on its own.
 	Draft string
+	// Sonar is the path to the binary composing this prompt. The `sonar` on
+	// PATH may be an older release that does not know this file's format —
+	// which is exactly the case when someone is migrating — so the checks the
+	// prompt asks for name this binary rather than a bare `sonar`.
+	Sonar string
 	// HasSkill says the sonar agent skill is installed, so the prompt can
 	// point at it instead of repeating it.
 	HasSkill bool
