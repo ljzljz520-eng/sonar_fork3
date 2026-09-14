@@ -393,13 +393,39 @@ sonar groups remove "$group" jobs
 `sonar groups <name>` shows one group's ports and services, and the services
 that are declared but not running.
 
-`sonar init` writes a `sonar.yaml` at the git root from what is listening right
-now — desktop apps and ports below 1024 left out. It refuses to overwrite
-without `--force`, and `--dry-run` prints the file instead of writing it.
-`--merge` appends to a file that is already there instead of refusing, and
-`--service name:port[:health]` — repeatable — writes the services you name
-instead of the ones it found, keeping the command it guessed for a port you
-kept. `--force` and `--merge` are mutually exclusive.
+`sonar init` writes a `sonar.yaml` at the git root from what it can state: the
+ports listening inside the project right now (desktop apps and ports below 1024
+left out), plus what a compose file or a `package.json` declares outright — one
+service per compose service, with its published port and its `depends_on`, and
+the `dev` script run by whichever package manager your lockfile commits you to.
+Where the two disagree, the listening port wins: it is evidence, not a
+statement. The file it writes says what it could not work out.
+
+Nothing else is detected. A Makefile target, a Procfile line, an entry point
+buried in a framework — those are guesses about your repository, and a table of
+them would never be finished. That part goes to an agent:
+
+```sh
+sonar init --agent              # whichever agent is installed
+sonar init --agent codex        # name one
+sonar init --agent claude -- --allow-dangerously-skip-permissions
+```
+
+`--agent` opens the coding agent you already have, in this terminal, with the
+prompt already sent: what sonar knows, the draft it would have written, the
+format, and the rule that it writes the file and starts nothing. You watch it
+read the repository and approve its edits exactly as you always do — it is your
+agent, under your permissions — and anything after `--` is passed to it. sonar
+knows `claude`, `codex`, `cursor-agent` and `opencode`; with several installed,
+name one. When the agent exits, sonar loads the file and prints the services it
+declares, or why it does not load. Without a terminal — a pipe, CI — `--agent`
+prints the prompt instead of starting anything.
+
+It refuses to overwrite without `--force`, and `--dry-run` prints the file
+instead of writing it. `--merge` appends to a file that is already there
+instead of refusing, and `--service name:port[:health]` — repeatable — writes
+the services you name instead of the ones it found, keeping the command it
+guessed for a port you kept. `--force` and `--merge` are mutually exclusive.
 
 `sonar groups add <group> <name> --port N` appends a service to that group's
 `sonar.yaml`, with `--cmd`, `--cwd`, `--health`, `--description`, `--icon`,
