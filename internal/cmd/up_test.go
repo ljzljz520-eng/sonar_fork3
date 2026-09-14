@@ -33,7 +33,7 @@ func TestUpParamsUsesTheConfigInTheWorkingDirectory(t *testing.T) {
 	chdir(t, dir)
 
 	upOnly = nil
-	params, err := upParams(nil)
+	params, _, err := upParams(nil)
 	if err != nil {
 		t.Fatalf("upParams: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestUpParamsPassesTheGroupName(t *testing.T) {
 	upOnly = []string{"api", "db"}
 	t.Cleanup(func() { upOnly = nil })
 
-	params, err := upParams([]string{"  storefront "})
+	params, _, err := upParams([]string{"  storefront "})
 	if err != nil {
 		t.Fatalf("upParams: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestUpParamsWithoutAConfig(t *testing.T) {
 	chdir(t, t.TempDir())
 	upOnly = nil
 
-	_, err := upParams(nil)
+	_, _, err := upParams(nil)
 	if err == nil {
 		t.Fatal("expected an error with no .sonar.yaml anywhere")
 	}
@@ -91,7 +91,7 @@ func TestUpParamsReportsABrokenConfig(t *testing.T) {
 	chdir(t, dir)
 	upOnly = nil
 
-	_, err := upParams(nil)
+	_, _, err := upParams(nil)
 	if err == nil {
 		t.Fatal("expected an error for an invalid config")
 	}

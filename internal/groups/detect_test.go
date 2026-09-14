@@ -168,3 +168,27 @@ func TestMergedConfigLoads(t *testing.T) {
 		t.Fatalf("a detected config does not load: %v\n%s", err, data)
 	}
 }
+
+// TestUsesAssignedPorts: the CLI asks this before handing a file to a daemon,
+// because one that predates the format parses it and blames the file.
+func TestUsesAssignedPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  *Config
+		want bool
+	}{
+		{"a fixed port is understood by any daemon",
+			&Config{Services: []Service{{Name: "db", Cmd: "postgres", Port: 5432}}}, false},
+		{"an auto port is not", &Config{Services: []Service{{Name: "api", PortAuto: true}}}, true},
+		{"an env block is not", &Config{Services: []Service{{Name: "api", Env: map[string]string{"A": "b"}}}}, true},
+		{"a reference in cmd is not",
+			&Config{Services: []Service{{Name: "api", Cmd: "api --port ${port}"}}}, true},
+		{"an empty file is", &Config{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.UsesAssignedPorts(); got != tt.want {
+				t.Errorf("UsesAssignedPorts = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

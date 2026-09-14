@@ -77,6 +77,13 @@ type OKResult struct {
 	OK bool `json:"ok"`
 }
 
+// CapabilityAutoPorts is announced by a daemon that understands the config
+// format v0.8.0 introduced: `port: auto`, `env:` and ${…} references. A client
+// holding such a file checks for it before handing the file over, because an
+// older daemon parses it itself and reports it as invalid — blaming the file
+// for the daemon's age.
+const CapabilityAutoPorts = "groups.autoports"
+
 // Include lists the optional per-subscriber enrichments ("stats", "health").
 type Include []string
 

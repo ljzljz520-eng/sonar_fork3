@@ -46,7 +46,7 @@ func init() {
 }
 
 func upRun(cmd *cobra.Command, args []string) error {
-	params, err := upParams(args)
+	params, cfg, err := upParams(args)
 	if err != nil {
 		return err
 	}
@@ -56,6 +56,10 @@ func upRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer c.Close()
+
+	if err := requireConfigSupport(c, cfg); err != nil {
+		return err
+	}
 
 	var start rpc.GroupsStartResult
 	stream, err := c.Stream(cmd.Context(), "groups.start", params, &start)
@@ -69,7 +73,7 @@ func upRun(cmd *cobra.Command, args []string) error {
 
 // upParams turns the command line into groups.start params: a name when one was
 // given, the config at or above the working directory otherwise.
-func upParams(args []string) (rpc.GroupsStartParams, error) {
+func upParams(args []string) (rpc.GroupsStartParams, *groups.Config, error) {
 	params := rpc.GroupsStartParams{HostParams: hostParams(), Only: upOnly}
 	if !onRemoteHost() {
 		// The services run as if started from this shell. A remote host gets
@@ -77,21 +81,23 @@ func upParams(args []string) (rpc.GroupsStartParams, error) {
 		params.Env = callerEnv()
 	}
 	if len(args) == 1 {
+		// Named from anywhere: the file is the daemon's to find, so there is
+		// nothing here to check against it.
 		name := strings.TrimSpace(args[0])
 		params.Name = &name
-		return params, nil
+		return params, nil, nil
 	}
 	if onRemoteHost() {
 		// The config path below is a path on this machine, and the remote
 		// daemon resolves groups against its own sonar.yaml files. Naming the
 		// group is the only thing that can mean the same on both sides.
-		return params, fmt.Errorf("name the group to start on %s: `sonar up <group> --host %s`",
+		return params, nil, fmt.Errorf("name the group to start on %s: `sonar up <group> --host %s`",
 			remoteHostFlag, remoteHostFlag)
 	}
 
 	wd, err := os.Getwd()
 	if err != nil {
-		return params, fmt.Errorf("resolving the working directory: %w", err)
+		return params, nil, fmt.Errorf("resolving the working directory: %w", err)
 	}
 	index := groups.NewIndex()
 	index.Observe(wd)
@@ -101,13 +107,13 @@ func upParams(args []string) (rpc.GroupsStartParams, error) {
 		// at all, and saying so is the difference between a two-second fix and
 		// a puzzled `ls -a`.
 		if bad := index.Invalid(); len(bad) > 0 {
-			return params, fmt.Errorf("%s cannot be used: %w", groups.ConfigName, bad[0].Err)
+			return params, nil, fmt.Errorf("%s cannot be used: %w", groups.ConfigName, bad[0].Err)
 		}
-		return params, fmt.Errorf("no %s at or above %s\nhint: `sonar init` writes one, or name a group: `sonar up <group>`",
+		return params, nil, fmt.Errorf("no %s at or above %s\nhint: `sonar init` writes one, or name a group: `sonar up <group>`",
 			groups.ConfigName, shortPath(wd))
 	}
 	params.ConfigPath = &cfg.Path
-	return params, nil
+	return params, cfg, nil
 }
 
 // consumeStart prints one line per service as the daemon reports it, then the

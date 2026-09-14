@@ -7,6 +7,7 @@ import (
 
 	"github.com/raskrebs/sonar/internal/daemon/rpc"
 	"github.com/raskrebs/sonar/internal/display"
+	"github.com/raskrebs/sonar/internal/groups"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +40,7 @@ func init() {
 func downRun(cmd *cobra.Command, args []string) error {
 	cmd.SilenceUsage = true
 	params := rpc.GroupsKillParams{HostParams: hostParams(), Force: downForceFlag, Release: true}
+	var local *groups.Config
 	if len(args) == 1 {
 		params.Name = strings.TrimSpace(args[0])
 	} else {
@@ -56,6 +58,7 @@ func downRun(cmd *cobra.Command, args []string) error {
 		}
 		path := cfg.Path
 		params.ConfigPath = &path
+		local = cfg
 	}
 
 	c, err := connectForHostWrite(cmd.Context())
@@ -63,6 +66,10 @@ func downRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer c.Close()
+
+	if err := requireConfigSupport(c, local); err != nil {
+		return err
+	}
 
 	snapshot, err := hostSnapshot(cmd.Context(), c)
 	if err != nil {

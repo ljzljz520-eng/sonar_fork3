@@ -186,6 +186,21 @@ type Config struct {
 	Dir  string `yaml:"-"` // directory containing the file
 }
 
+// UsesAssignedPorts reports whether this file needs a daemon that knows the
+// format v0.8.0 introduced: a `port: auto` service, or an `env:` block whose
+// values may name another service's port.
+func (c *Config) UsesAssignedPorts() bool {
+	for _, s := range c.Services {
+		if s.PortAuto || len(s.Env) > 0 {
+			return true
+		}
+		if refPattern.MatchString(s.Cmd) {
+			return true
+		}
+	}
+	return false
+}
+
 // ConfigError reports every problem found in one file at once, so a user fixing
 // a config sees the whole list instead of one error per run.
 type ConfigError struct {

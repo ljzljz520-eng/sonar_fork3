@@ -62,6 +62,10 @@ func startProject(cmd *cobra.Command, req *projectRequest) error {
 	}
 	defer c.Close()
 
+	if err := requireConfigSupport(c, req.cfg); err != nil {
+		return err
+	}
+
 	path := req.cfg.Path
 	params := rpc.GroupsStartParams{ConfigPath: &path, Only: req.services, Env: callerEnv()}
 	var res rpc.GroupsStartResult
