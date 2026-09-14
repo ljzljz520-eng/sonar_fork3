@@ -17,15 +17,32 @@ var (
 	initDryRunFlag  bool
 	initMergeFlag   bool
 	initServiceFlag []string
+	initAgentFlag   string
 )
+
+// initNote is the last thing a freshly written file says. sonar states what it
+// can see; the rest is judgement about someone else's repository, and the
+// user's own agent is how that gets written.
+const initNote = `
+# sonar wrote what it could see: the ports listening inside this project, and
+# what a compose file or a package.json states outright. Anything missing — a
+# worker, a queue, a second API — belongs here too. To have your own coding
+# agent finish this file:
+#
+#   sonar init --agent
+`
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Write a sonar.yaml for this project from what is running now",
-	Long: "Proposes a group name and one service per listening port whose process\n" +
-		"works inside this repository, and writes it next to .git. Edit and\n" +
-		"commit the result, or name the services yourself with --service.",
-	Args: cobra.NoArgs,
+	Short: "Write a sonar.yaml for this project",
+	Long: "Proposes a group name and the services sonar can state: one per listening\n" +
+		"port whose process works inside this repository, plus what a compose file\n" +
+		"or a package.json declares outright. It writes that next to .git, and\n" +
+		"says what it could not work out.\n\n" +
+		"--agent hands the file to the coding agent you already have: sonar opens\n" +
+		"it here with the prompt already sent, so you see every file it reads and\n" +
+		"approve its edits as they come. Arguments after -- go to the agent.",
+	Args: cobra.ArbitraryArgs,
 	RunE: initRun,
 }
 
@@ -33,6 +50,10 @@ func init() {
 	initCmd.Flags().BoolVar(&initForceFlag, "force", false, "Overwrite an existing "+groups.ConfigName)
 	initCmd.Flags().BoolVar(&initMergeFlag, "merge", false, "Append to an existing "+groups.ConfigName+" instead of refusing")
 	initCmd.Flags().BoolVar(&initDryRunFlag, "dry-run", false, "Print the proposed file instead of writing it")
+	initCmd.Flags().StringVar(&initAgentFlag, "agent", "",
+		"Hand the file to a coding agent: --agent, or --agent `name` (claude, codex, cursor-agent, opencode)")
+	// `--agent` with no value means "whichever one is installed".
+	initCmd.Flags().Lookup("agent").NoOptDefVal = "auto"
 	initCmd.Flags().StringArrayVar(&initServiceFlag, "service", nil,
 		"Write this service instead of the proposal, as `name:port[:health]` (repeatable)")
 	rootCmd.AddCommand(initCmd)
@@ -56,6 +77,24 @@ func initRun(cmd *cobra.Command, args []string) error {
 		root = cwd
 		fmt.Fprintf(os.Stderr, "note: %s is not inside a git repository; using it as the project root\n", cwd)
 	}
+	cfg, live, err := proposeConfig(root, curated)
+	if err != nil {
+		return err
+	}
+
+	// The agent path is about the whole file, so an existing one is no
+	// obstacle: the agent edits it in place, the way the user would.
+	if initAgentFlag != "" {
+		name, extra, err := splitAgentArgs(cmd, args)
+		if err != nil {
+			return err
+		}
+		return runInitAgent(cmd, root, cfg, live, name, extra)
+	}
+	if len(args) > 0 {
+		return fmt.Errorf("sonar init takes no arguments; arguments after -- are for the agent, with --agent")
+	}
+
 	// An existing config is written in place whatever its spelling, so --merge
 	// and --force never leave a second file next to a `.sonar.yaml`.
 	target := groups.TargetIn(root)
@@ -64,11 +103,6 @@ func initRun(cmd *cobra.Command, args []string) error {
 
 	if exists && !initForceFlag && !initMergeFlag && !initDryRunFlag {
 		return fmt.Errorf("%s already exists; pass --force to overwrite it or --merge to append to it", target)
-	}
-
-	cfg, err := proposeConfig(root, curated)
-	if err != nil {
-		return err
 	}
 
 	if initMergeFlag && exists {
@@ -84,6 +118,7 @@ func initRun(cmd *cobra.Command, args []string) error {
 	if _, err := groups.Parse(target, data); err != nil {
 		return err
 	}
+	data = append(data, []byte(initNote)...)
 
 	if initDryRunFlag {
 		fmt.Print(string(data))
@@ -100,13 +135,14 @@ func initRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// proposeConfig is the file this run would write: the proposal built from what
-// is listening, with the caller's own service list put in its place when
-// --service was given.
-func proposeConfig(root string, curated []groups.ServiceAdd) (*groups.Config, error) {
+// proposeConfig is the file this run would write: what is listening, plus what
+// a compose file or a package.json declares, with the caller's own service
+// list put in its place when --service was given. It hands back the scan too,
+// which the agent prompt reports as the evidence it is.
+func proposeConfig(root string, curated []groups.ServiceAdd) (*groups.Config, []ports.ListeningPort, error) {
 	results, err := ports.Scan()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	docker.EnrichPorts(results)
 	ports.Enrich(results)
@@ -114,10 +150,13 @@ func proposeConfig(root string, curated []groups.ServiceAdd) (*groups.Config, er
 
 	_, index := groups.Attribute(results)
 	cfg := groups.Propose(root, results, index)
+	// What a file declares fills in around what is listening, which wins: an
+	// open port is evidence, and a declaration is only a statement.
+	cfg = groups.Merge(cfg, groups.Detect(root))
 	if len(curated) > 0 {
 		cfg = groups.Curate(cfg, curated)
 	}
-	return cfg, nil
+	return cfg, results, nil
 }
 
 // initMerge appends the proposal into a file that is already there. The append
