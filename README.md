@@ -657,7 +657,7 @@ Every write takes `--host` too, and does there exactly what it does here:
 ```sh
 sonar kill 3000 --host hetzner                 # stop a port on that machine
 sonar kill -g api --host hetzner               # a whole group of its services
-sonar kill-all --filter docker --host hetzner  # its containers
+sonar kill --all --filter docker --host hetzner # its containers
 sonar up api --host hetzner                    # start a group from its sonar.yaml
 sonar logs 3000 --host hetzner                 # tail its output here
 sonar rename 3000 storefront --host hetzner    # its name, in its database
@@ -775,8 +775,7 @@ services:               # label custom/unknown ports
 ```
 
 Invalid values are ignored with a warning and sonar carries on with defaults.
-Environment overrides that have no config key: `SONAR_DB`, `SONAR_SOCKET`,
-`SONAR_NO_HINTS=1` to silence the migration notices below, and
+Environment overrides that have no config key: `SONAR_DB`, `SONAR_SOCKET` and
 `SONAR_NO_AUTOSTART=1` to stop any sonar client from starting a daemon it did
 not find — useful in CI, where a build should never leave a process behind.
 
@@ -961,30 +960,21 @@ tray` finds an app installed with `--dir` and how `sonar doctor`'s
 
 ## Moving from the old commands
 
-The pre-group commands still work and print a single line on stderr saying what
-replaced them. They go away one minor release from now. `SONAR_NO_HINTS=1`
-silences the notices, and `--json` output never carries them.
+These went away in v0.9.0, a release after they started printing what replaced
+them:
 
-| Old | New |
+| Removed | Use |
 |---|---|
 | `sonar run --tag X -- cmd` | `sonar start --group X -- cmd` |
 | `sonar runs` | `sonar start --list` |
 | `sonar list --tag X` | `sonar list --group X` |
 | `sonar kill-all --filter docker` | `sonar kill --all --filter docker` |
-| `sonar down X` (a profile) | `sonar kill -g X`; `sonar down` now stops a `sonar.yaml` project |
-| `sonar profile create X` | `sonar init` |
-| `sonar profile show X` | `sonar groups X` |
-| `sonar up X` (checked a profile) | `sonar up X` now *starts* the group |
-| `sonar tray` (Swift menu bar app) | `sonar tray` launches the desktop app |
+| `sonar down X` (a profile) | `sonar kill -g X` — `sonar down` now stops a `sonar.yaml` project |
+| `sonar profile list`, `show`, `create`, `delete` | `sonar groups`, `sonar groups X`, `sonar init` |
 
 Profiles were a per-machine snapshot of ports; `sonar.yaml` is committed with
-the project. Convert one and read it before you keep it — nothing is written
-for you:
-
-```sh
-sonar profile list
-# check
-```
+the project. `sonar profile export` is the one profile command still here, and
+it exists to get you off them — it prints, and never writes:
 
 ```sh
 sonar profile export my-app > sonar.yaml
