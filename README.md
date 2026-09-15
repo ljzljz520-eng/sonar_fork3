@@ -120,9 +120,9 @@ sonar start
 ```
 
 ```
-  ✓ db        port 5432  pid 41022  ~/.config/sonar/logs/my-app/db.log
-  ✓ api       port 21408  pid 41040  ~/.config/sonar/logs/my-app/api.log
-  ✓ frontend  port 21409  pid 41077  ~/.config/sonar/logs/my-app/frontend.log
+  ✓ db        http://localhost:5432   pid 41022  ~/.config/sonar/logs/my-app/db.log
+  ✓ api       http://localhost:21408  pid 41040  ~/.config/sonar/logs/my-app/api.log
+  ✓ frontend  http://localhost:21409  pid 41077  ~/.config/sonar/logs/my-app/frontend.log
 
 3 started
 following the logs; Ctrl+C stops the 3 services started here
@@ -349,9 +349,9 @@ the environment of the shell you ran `sonar up` in, plus `PORT` for a service
 with a port.
 
 ```
-  ✓ db        port 5432  pid 41022  ~/.config/sonar/logs/my-app/db.log
+  ✓ db        http://localhost:5432  pid 41022  ~/.config/sonar/logs/my-app/db.log
   - api       already running
-  ✓ frontend  port 5173  pid 41108  ~/.config/sonar/logs/my-app/frontend.log
+  ✓ frontend  http://localhost:5173  pid 41108  ~/.config/sonar/logs/my-app/frontend.log
 
 2 started, 1 already running
 ```
