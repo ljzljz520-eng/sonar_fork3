@@ -169,11 +169,13 @@ func printStartChunk(c rpc.GroupsStartChunk) {
 		}
 		fmt.Printf("  %s %s  %s\n", display.Dim("-"), display.Bold(c.Service), display.Dim(reason))
 	default:
-		where := fmt.Sprintf("pid %d  %s", c.PID, shortPath(c.LogPath))
+		// The address, not the port number: a terminal makes a URL clickable,
+		// and opening the thing you just started is the next thing you do.
+		where := display.Dim(fmt.Sprintf("pid %d  %s", c.PID, shortPath(c.LogPath)))
 		if c.Port > 0 {
-			where = fmt.Sprintf("port %d  %s", c.Port, where)
+			where = display.Underline(groups.URL(c.Port)) + "  " + where
 		}
-		fmt.Printf("  %s %s  %s\n", display.Green("✓"), display.Bold(c.Service), display.Dim(where))
+		fmt.Printf("  %s %s  %s\n", display.Green("✓"), display.Bold(c.Service), where)
 	}
 }
 
