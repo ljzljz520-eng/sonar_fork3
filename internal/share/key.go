@@ -37,6 +37,10 @@ type target struct {
 	// checkouts shipped, so keying on one would store a string with two fields
 	// already inside it.
 	Group string
+	// Image is the container image behind the port, when there is one. Like
+	// Group it is for a sentence a person reads — the probe decides whether a
+	// port speaks HTTP, and this only says what to name in the refusal.
+	Image string
 
 	// The committed key. Empty Repo means the fallback key is in force.
 	Repo     string
@@ -93,6 +97,9 @@ func resolveTarget(snap state.Snapshot, sel rpc.Selector) (target, error) {
 	}
 
 	out := target{Port: port.Port}
+	if port.Docker != nil {
+		out.Image = strings.TrimSpace(port.Docker.Image)
+	}
 	if port.ProjectRoot != nil {
 		out.ProjectRoot = *port.ProjectRoot
 	}

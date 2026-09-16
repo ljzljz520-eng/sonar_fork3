@@ -65,6 +65,10 @@ type Manager struct {
 	// dial runs one tunnel until it ends. A seam, so the tests drive create,
 	// stop, extend and the liveness rules without a relay to dial.
 	dial func(ctx context.Context, cfg tunnel.Config) error
+	// probeFn asks a local address what it is. A seam for the same reason as
+	// dial: a test that had to stand up a Postgres to prove the refusal would
+	// not be run.
+	probeFn func(ctx context.Context, addr string) (probeResult, error)
 	// connectTimeout is how long Create waits for `ready`.
 	connectTimeout time.Duration
 	// installID is this machine's id for the fallback key.
@@ -131,6 +135,9 @@ func New(opts Options) *Manager {
 	if m.now == nil {
 		m.now = time.Now
 	}
+	if m.probeFn == nil {
+		m.probeFn = probe
+	}
 	if m.dial == nil {
 		m.dial = tunnel.Run
 	}
@@ -144,21 +151,21 @@ func New(opts Options) *Manager {
 }
 
 // Create is `share.create`.
-func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCreateParams) (state.Share, error) {
+func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCreateParams) (state.Share, []string, error) {
 	reach := strings.TrimSpace(strings.ToLower(p.Reach))
 	switch reach {
 	case "":
 		// Deliberately not a default. See the package comment.
-		return state.Share{}, rpc.NewError(rpc.CodeInvalidParams,
+		return state.Share{}, nil, rpc.NewError(rpc.CodeInvalidParams,
 			`a reach is required: "lan" for this network, "public" for the internet`,
 			"there is no default, because the two are too far apart to pick by accident")
 	case ReachLAN:
-		return state.Share{}, rpc.NewError(rpc.CodeUnsupported,
+		return state.Share{}, nil, rpc.NewError(rpc.CodeUnsupported,
 			"sharing on the LAN is not built yet",
 			"`--public` works today; a LAN share is a listener on this machine and is still to come")
 	case ReachPublic:
 	default:
-		return state.Share{}, rpc.Errorf(rpc.CodeInvalidParams,
+		return state.Share{}, nil, rpc.Errorf(rpc.CodeInvalidParams,
 			"%q is not a reach; use \"lan\" or \"public\"", p.Reach)
 	}
 
@@ -166,7 +173,7 @@ func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCr
 	if p.TTL != nil {
 		normalized, ok := NormalizeTTL(*p.TTL)
 		if !ok {
-			return state.Share{}, rpc.Errorf(rpc.CodeInvalidParams,
+			return state.Share{}, nil, rpc.Errorf(rpc.CodeInvalidParams,
 				"%q is not a ttl; use %q, %q or %q", *p.TTL, TTLWhileItRuns, TTLOneHour, TTLOneDay)
 		}
 		ttl = normalized
@@ -174,7 +181,7 @@ func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCr
 
 	t, err := resolveTarget(snap, p.Target)
 	if err != nil {
-		return state.Share{}, err
+		return state.Share{}, nil, err
 	}
 
 	// Publishing the same thing twice gets the same URL, and when this daemon
@@ -182,21 +189,29 @@ func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCr
 	// slug would have the relay hand the share to the new connection and tell
 	// the old one it was replaced, for no gain.
 	if existing, ok := m.liveFor(t); ok {
-		return existing.snapshot(), nil
+		return existing.snapshot(), nil, nil
+	}
+
+	// Ask the port what it is before reserving anything. A share pointed at a
+	// database is a URL that will never work, and finding that out from a
+	// blank page costs a slug and whatever the link was pasted into.
+	notes, err := m.checkTarget(ctx, t)
+	if err != nil {
+		return state.Share{}, nil, err
 	}
 
 	req, err := m.request(t, ttl, p.Replace)
 	if err != nil {
-		return state.Share{}, err
+		return state.Share{}, nil, err
 	}
 	view, err := m.publish(ctx, req, t)
 	if err != nil {
-		return state.Share{}, err
+		return state.Share{}, nil, err
 	}
 
 	token, err := m.session.Token()
 	if err != nil {
-		return state.Share{}, err
+		return state.Share{}, nil, err
 	}
 
 	row := m.viewToShare(view, ReachPublic)
@@ -257,7 +272,7 @@ func (m *Manager) Create(ctx context.Context, snap state.Snapshot, p rpc.ShareCr
 	out := l.snapshot()
 	m.log.Info("share published", "slug", view.Slug, "url", out.URL,
 		"port", t.Port, "status", out.Status, "ttl", ttl)
-	return out, nil
+	return out, notes, nil
 }
 
 // controlURL is where the tunnel dials. The relay's own origin unless this

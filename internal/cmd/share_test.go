@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,7 +146,10 @@ func TestNotSignedInSignsInHereAndThenShares(t *testing.T) {
 	srv := httptest.NewServer(relay.handler())
 	t.Cleanup(srv.Close)
 
-	c := shareDaemonFor(t, []ports.ListeningPort{{Port: 3000, PID: 4242, Process: "node", Cwd: "/src/demo"}})
+	// A real dev server on a real port: the daemon asks a port what it is
+	// before it shares it, and a port with nothing behind it is refused.
+	appPort := servingHTTP(t)
+	c := shareDaemonFor(t, []ports.ListeningPort{{Port: appPort, PID: 4242, Process: "node", Cwd: "/src/demo"}})
 
 	// After the daemon, never before: its own OnStart hooks build a session and
 	// a share manager pointed at the configured relay, and they would replace
@@ -168,7 +172,7 @@ func TestNotSignedInSignsInHereAndThenShares(t *testing.T) {
 	share.SetManager(shareMgr)
 	t.Cleanup(func() { shareMgr.StopAll(); share.SetManager(nil) })
 
-	port := 3000
+	port := appPort
 	params := rpc.ShareCreateParams{Target: rpc.Selector{Port: &port}, Reach: "public"}
 
 	var res rpc.ShareCreateResult
@@ -233,6 +237,19 @@ func withReachFlags(t *testing.T, public, lan bool) {
 	prevPublic, prevLAN := sharePublic, shareLAN
 	sharePublic, shareLAN = public, lan
 	t.Cleanup(func() { sharePublic, shareLAN = prevPublic, prevLAN })
+}
+
+// servingHTTP is an application on a real loopback port, for the tests that go
+// through the daemon's own check that a share's target speaks HTTP.
+func servingHTTP(t *testing.T) int {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><title>app</title>"))
+	}))
+	t.Cleanup(srv.Close)
+	addr := srv.Listener.Addr().(*net.TCPAddr)
+	return addr.Port
 }
 
 // shareDaemonFor starts a daemon over a fixed port table and hands back a

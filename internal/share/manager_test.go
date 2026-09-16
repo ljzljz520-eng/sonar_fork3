@@ -27,7 +27,7 @@ func TestPublishGivesAURLAndDialsTheSlug(t *testing.T) {
 	e := newEnv(t)
 	snap := committedSnapshot(3000, "acme", "", "web")
 
-	share, err := e.m.Create(context.Background(), snap, createParams(3000, ReachPublic))
+	share, _, err := e.m.Create(context.Background(), snap, createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRepublishingTheSameServiceReturnsTheSameSlug(t *testing.T) {
 	snap := committedSnapshot(3000, "acme", "", "web")
 	ctx := context.Background()
 
-	first, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
+	first, _, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestRepublishingTheSameServiceReturnsTheSameSlug(t *testing.T) {
 	if _, err := e.m.Stop(ctx, rpc.ShareStopParams{All: true}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
+	second, _, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,14 +90,14 @@ func TestTheSameServiceOnAnotherPortKeepsItsURL(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	first, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	first, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.m.Stop(ctx, rpc.ShareStopParams{All: true}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := e.m.Create(ctx, committedSnapshot(3001, "acme", "", "web"), createParams(3001, ReachPublic))
+	second, _, err := e.m.Create(ctx, committedSnapshot(3001, "acme", "", "web"), createParams(3001, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,11 @@ func TestTwoWorktreesGetTwoURLs(t *testing.T) {
 	ctx := context.Background()
 	e.relay.limit = 99
 
-	main, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	main, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wt, err := e.m.Create(ctx, committedSnapshot(3001, "acme", "feature", "web"), createParams(3001, ReachPublic))
+	wt, _, err := e.m.Create(ctx, committedSnapshot(3001, "acme", "feature", "web"), createParams(3001, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,12 +129,12 @@ func TestTheLimitIsAnOfferWithTheLiveShareAttached(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	first, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	first, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = e.m.Create(ctx, committedSnapshot(4000, "acme", "", "api"), createParams(4000, ReachPublic))
+	_, _, err = e.m.Create(ctx, committedSnapshot(4000, "acme", "", "api"), createParams(4000, ReachPublic))
 	if got := codeOf(t, err); got != rpc.CodeShareLimitReached {
 		t.Fatalf("code = %d, want %d", got, rpc.CodeShareLimitReached)
 	}
@@ -152,13 +152,13 @@ func TestReplaceMovesTheShare(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	first, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	first, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
 	params := createParams(4000, ReachPublic)
 	params.Replace = true
-	second, err := e.m.Create(ctx, committedSnapshot(4000, "acme", "", "api"), params)
+	second, _, err := e.m.Create(ctx, committedSnapshot(4000, "acme", "", "api"), params)
 	if err != nil {
 		t.Fatalf("replace: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestStopEndsTheShareAndKeepsTheReservation(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	share, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	share, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestExtendKeepsTheURLAndMovesTheExpiry(t *testing.T) {
 	hour := TTLOneHour
 	params := createParams(3000, ReachPublic)
 	params.TTL = &hour
-	share, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), params)
+	share, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestNotSignedInIs1110AndNothingIsPublished(t *testing.T) {
 	e := newEnv(t)
 	e.call.notSigned = true
 
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ReachPublic))
 	if got := codeOf(t, err); got != rpc.CodeNotSignedIn {
 		t.Fatalf("code = %d, want %d (not_signed_in)", got, rpc.CodeNotSignedIn)
@@ -249,7 +249,7 @@ func TestARevokedSessionIsAlso1110(t *testing.T) {
 	e := newEnv(t)
 	e.relay.signedIn = false
 
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ReachPublic))
 	if got := codeOf(t, err); got != rpc.CodeNotSignedIn {
 		t.Fatalf("code = %d, want %d", got, rpc.CodeNotSignedIn)
@@ -258,7 +258,7 @@ func TestARevokedSessionIsAlso1110(t *testing.T) {
 
 func TestABareReachIsRefused(t *testing.T) {
 	e := newEnv(t)
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ""))
 	if got := codeOf(t, err); got != rpc.CodeInvalidParams {
 		t.Fatalf("code = %d, want invalid_params", got)
@@ -270,7 +270,7 @@ func TestABareReachIsRefused(t *testing.T) {
 
 func TestLANSaysItIsNotBuilt(t *testing.T) {
 	e := newEnv(t)
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ReachLAN))
 	if got := codeOf(t, err); got != rpc.CodeUnsupported {
 		t.Fatalf("code = %d, want unsupported", got)
@@ -282,7 +282,7 @@ func TestLANSaysItIsNotBuilt(t *testing.T) {
 
 func TestNothingListeningIs1100(t *testing.T) {
 	e := newEnv(t)
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(9999, ReachPublic))
 	if got := codeOf(t, err); got != rpc.CodeTargetNotListening {
 		t.Fatalf("code = %d, want %d", got, rpc.CodeTargetNotListening)
@@ -293,7 +293,7 @@ func TestABadTTLNamesTheThreeChoices(t *testing.T) {
 	e := newEnv(t)
 	params := createParams(3000, ReachPublic)
 	params.TTL = ptr("a fortnight")
-	_, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"), params)
+	_, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"), params)
 	if got := codeOf(t, err); got != rpc.CodeInvalidParams {
 		t.Fatalf("code = %d", got)
 	}
@@ -307,7 +307,7 @@ func TestABadTTLNamesTheThreeChoices(t *testing.T) {
 // A project with no sonar.yaml still shares, on the fallback key.
 func TestAProjectWithNoConfigUsesTheFallbackKey(t *testing.T) {
 	e := newEnv(t)
-	share, err := e.m.Create(context.Background(), fallbackSnapshot(8080, "/tmp/scratch"),
+	share, _, err := e.m.Create(context.Background(), fallbackSnapshot(8080, "/tmp/scratch"),
 		createParams(8080, ReachPublic))
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -335,7 +335,7 @@ func TestAServiceThatStaysGoneEndsTheShare(t *testing.T) {
 	e := newEnv(t)
 	e.dialer.end = tunnel.ErrServiceGone
 
-	share, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	share, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -370,11 +370,11 @@ func TestAskingTwiceWhileLiveIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	snap := committedSnapshot(3000, "acme", "", "web")
 
-	first, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
+	first, _, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
+	second, _, err := e.m.Create(ctx, snap, createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatalf("the second ask failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestListAndLogs(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 
-	share, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
+	share, _, err := e.m.Create(ctx, committedSnapshot(3000, "acme", "", "web"), createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestASlowConnectionStillAnswersWithTheURL(t *testing.T) {
 	e.dialer.connected = false
 	e.m.connectTimeout = 100 * time.Millisecond
 
-	share, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
+	share, _, err := e.m.Create(context.Background(), committedSnapshot(3000, "acme", "", "web"),
 		createParams(3000, ReachPublic))
 	if err != nil {
 		t.Fatalf("create: %v", err)

@@ -138,6 +138,7 @@ func runShare(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	printShare(res.Share, port)
+	printNotes(res.Notes)
 	return nil
 }
 
@@ -428,6 +429,43 @@ func shareStopRun(ctx context.Context, args []string) error {
 }
 
 // printShare is what a person reads when it worked.
+// printNotes puts the daemon's sentences under the URL. They are advice about
+// the share that was just made, never failures, so they are dim and they come
+// after the link rather than in front of it.
+func printNotes(notes []string) {
+	for _, n := range notes {
+		if strings.TrimSpace(n) == "" {
+			continue
+		}
+		fmt.Println()
+		for _, line := range wrapNote(n) {
+			fmt.Println(display.Dim("  " + line))
+		}
+	}
+}
+
+// wrapNote breaks a sentence at 72 columns, which is what the rest of this
+// output is written to.
+func wrapNote(s string) []string {
+	var out []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		switch {
+		case line == "":
+			line = word
+		case len(line)+1+len(word) <= 72:
+			line += " " + word
+		default:
+			out = append(out, line)
+			line = word
+		}
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
+}
+
 func printShare(s state.Share, port int) {
 	fmt.Println()
 	fmt.Printf("  %s %s %s\n",

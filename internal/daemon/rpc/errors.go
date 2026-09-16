@@ -57,6 +57,7 @@ const (
 	CodeShareExpired       = 1111
 	CodeRelayUnreachable   = 1112
 	CodeShareBlocked       = 1113
+	CodeTargetNotHTTP      = 1114
 
 	// 1200-1299 are owned by spec 2 (MCP, sessions and claims).
 	CodeSessionNotFound = 1200
@@ -85,6 +86,7 @@ var codeNames = map[int]string{
 	CodeShareExpired:       "share_expired",
 	CodeRelayUnreachable:   "relay_unreachable",
 	CodeShareBlocked:       "share_blocked",
+	CodeTargetNotHTTP:      "target_not_http",
 
 	CodeSessionNotFound: "session_not_found",
 	CodeClaimConflict:   "claim_conflict",

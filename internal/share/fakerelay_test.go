@@ -347,6 +347,9 @@ func newEnv(t *testing.T) *env {
 		ConnectTimeout: 2 * time.Second,
 		InstallID:      "install-aaaa",
 	})
+	m.probeFn = func(context.Context, string) (probeResult, error) {
+		return probeResult{verdict: speaksHTTP, contentType: "text/html"}, nil
+	}
 	t.Cleanup(m.StopAll)
 	return &env{relay: relay, call: caller, dialer: dialer, m: m}
 }

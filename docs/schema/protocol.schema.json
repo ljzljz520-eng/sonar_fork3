@@ -3967,6 +3967,12 @@
         },
         "share": {
           "$ref": "#/definitions/Share"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object",

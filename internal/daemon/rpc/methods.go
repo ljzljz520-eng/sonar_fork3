@@ -943,6 +943,10 @@ type ShareCreateParams struct {
 type ShareCreateResult struct {
 	MutationResult
 	Share state.Share `json:"share"`
+	// Notes are sentences worth putting in front of the person who ran this,
+	// about the share that was just made. Never failures — a failure is an
+	// error — and never more than a line each.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // ShareStopParams names the shares to stop: one by id, the ones on a target,

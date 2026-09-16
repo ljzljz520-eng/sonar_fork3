@@ -128,13 +128,14 @@ func handleCreate(ctx context.Context, req *daemon.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	share, err := m.Create(ctx, snap, p)
+	share, notes, err := m.Create(ctx, snap, p)
 	if err != nil {
 		return nil, err
 	}
 	return rpc.ShareCreateResult{
 		MutationResult: rpc.MutationResult{OK: true, Affected: affected(share)},
 		Share:          share,
+		Notes:          notes,
 	}, nil
 }
 
