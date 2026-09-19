@@ -244,6 +244,8 @@ func registerRun(h *spawn.Handle) bool {
 			Cwd:              h.Cwd,
 			StartedAt:        h.StartedAt.Format(time.RFC3339),
 			ID:               &h.ID,
+			Token:            h.Token,
+			Birth:            runs.FormatTime(h.Birth),
 			AllowOutsideHome: true,
 		}
 		if h.Session.ID != "" {
@@ -315,6 +317,8 @@ func fallbackEntry(h *spawn.Handle) runs.Entry {
 		Cwd:       h.Cwd,
 		PPID:      h.PPID,
 		PortHint:  h.PortHint,
+		Token:     h.Token,
+		Birth:     runs.FormatTime(h.Birth),
 	}
 }
 

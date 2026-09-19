@@ -2,16 +2,26 @@
 // `sonar start` (and `runs.spawn`). It answers three questions: what is
 // running, which run owns a listening port, and where does a detached run log.
 //
-// The registry is in memory and authoritative while the daemon lives. It also
-// mirrors itself into the legacy ~/.config/sonar/runs.json, because the port
-// scanner attributes listeners by walking their PPID ancestry against that
-// file; keeping one writer (the daemon) and one reader (the scanner) is what
-// makes `sonar list` show `group_source: start` with or without a daemon.
+// The registry is authoritative while the daemon lives and durably journals
+// every transition (journal.go): a restart replays the live runs, the exit
+// history and every run's provenance and log cursor. It also mirrors itself
+// into the legacy ~/.config/sonar/runs.json, because the port scanner
+// attributes listeners by walking their PPID ancestry against that file;
+// keeping one writer (the daemon) and one reader (the scanner) is what makes
+// `sonar list` show `group_source: start` with or without a daemon.
+//
+// A PID is only an address, never an identity. Runs are keyed by a random
+// start token (and matched additionally against the process birth time the
+// kernel reports), so a PID reused by a different process is diagnosed as
+// stale_identity and is never attributed ports or sent a kill signal.
 package runsreg
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,15 +40,20 @@ const maxAncestry = 64
 
 // Record is one registered run.
 type Record struct {
-	ID        string
-	PID       int
-	PPID      int
-	Group     string
-	Name      string
-	Cmd       string
-	Cwd       string
+	ID    string
+	Token string
+	PID   int
+	PPID  int
+	Group string
+	Name  string
+	Cmd   string
+	Cwd   string
+
 	PortHint  int
 	StartedAt time.Time
+	// Birth is the process creation time observed at registration, the
+	// platform-independent identity evidence alongside Token.
+	Birth time.Time
 	// ConfigPath, StartID and Origin say where a run came from: the
 	// sonar.yaml it was started from, the groups.start that started it with
 	// its siblings, and the client that asked for it (cli, app, mcp).
@@ -59,13 +74,44 @@ type Record struct {
 	stopping bool
 }
 
+// Diagnostic codes.
+const (
+	DiagStaleIdentity       = "stale_identity"
+	DiagLegacyQuarantined   = "legacy_quarantined"
+	DiagJournalQuarantined  = "journal_quarantined"
+	DiagJournalTruncated    = "journal_truncated"
+	DiagSnapshotQuarantined = "snapshot_quarantined"
+)
+
+// maxDiagnostics bounds how many diagnostics are retained.
+const maxDiagnostics = 200
+
+// Diagnostic is an explicit report about identity or persisted-state trouble.
+type Diagnostic struct {
+	Code   string
+	PID    int
+	Token  string
+	RunID  string
+	At     time.Time
+	Detail string
+	// Backup is the quarantine copy, when one was made.
+	Backup string
+}
+
 // Registry holds the live runs. The zero value is not usable; call New.
 type Registry struct {
-	mu   sync.Mutex
-	runs map[int]Record
+	mu sync.Mutex
+	// runs is token -> live record.
+	runs map[string]Record
+	// byPID is pid -> token of the run currently claiming it.
+	byPID map[int]string
+	// exits is the history of runs that ended, oldest first, capped.
+	exits []Exit
+	diags []Diagnostic
 
-	// Alive reports whether a pid is still running. Tests replace it.
-	Alive func(pid int) bool
+	// Probe gathers identity evidence for a pid. Tests replace it; default is
+	// the platform probe.
+	Probe func(pid int) runs.Info
 	// Parents returns a pid -> ppid table for the ancestry walk. Tests replace
 	// it; production reads the same process table the scanner builds.
 	Parents func() map[int]int
@@ -76,33 +122,241 @@ type Registry struct {
 	parentsAt time.Time
 	now       func() time.Time
 
-	// exits is the history of runs that ended, oldest first, capped at
-	// maxExits. It lives in memory: a daemon restart starts it over.
-	exits []Exit
+	// crash is the optional crash-injection hook, installed on the journal
+	// when one opens.
+	crash CrashHook
+
+	// j is the open durable journal; persist says it is usable.
+	j       *journal
+	persist bool
 }
 
 // New returns an empty registry that mirrors to runs.json.
 func New() *Registry {
 	return &Registry{
-		runs:    map[int]Record{},
-		Alive:   runs.PIDAlive,
+		runs:    map[string]Record{},
+		byPID:   map[int]string{},
+		Probe:   runs.Probe,
 		Parents: ports.ParentTable,
 		Mirror:  true,
 		now:     time.Now,
 	}
 }
 
-// Register records a run and returns it with its id filled in. Registering a
-// pid twice replaces the entry: a re-registered pid is the same process.
+// SetCrashHook installs a crash-injection hook (tests).
+func (r *Registry) SetCrashHook(h CrashHook) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.crash = h
+	if r.j != nil {
+		r.j.crash = h
+	}
+}
+
+// Reset returns the registry to an empty, non-persistent state. Called by the
+// daemon's OnStart hook before opening fresh files, so one Registry value is
+// reusable across daemon instances in-process.
+func (r *Registry) Reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runs = map[string]Record{}
+	r.byPID = map[int]string{}
+	r.exits = nil
+	r.diags = nil
+	r.parents = nil
+	r.parentsAt = time.Time{}
+	r.j = nil
+	r.persist = false
+}
+
+// probe gathers evidence for pid.
+func (r *Registry) probe(pid int) runs.Info {
+	p := r.Probe
+	if p == nil {
+		p = runs.Probe
+	}
+	return p(pid)
+}
+
+// statusOfLocked matches a recorded identity against the live process.
+func (r *Registry) statusOfLocked(rec Record) runs.Status {
+	return runs.VerifyInfo(r.probe(rec.PID), rec.Token, rec.Birth)
+}
+
+// newToken returns a random start token.
+func newToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "st" + strconv.Itoa(os.Getpid())
+	}
+	return "st" + hex.EncodeToString(b[:])
+}
+
+// installLocked puts rec into the live maps (register semantics).
+func (r *Registry) installLocked(rec Record) {
+	r.runs[rec.Token] = rec
+	r.byPID[rec.PID] = rec.Token
+}
+
+// forgetLocked removes a token from the live maps.
+func (r *Registry) forgetLocked(token string) {
+	delete(r.runs, token)
+	for pid, t := range r.byPID {
+		if t == token {
+			delete(r.byPID, pid)
+		}
+	}
+}
+
+// applyExitLocked moves a live run to the exit history. It is idempotent: a
+// token already in exits is left alone, which is what makes replaying an exit
+// (or a journal that contains a duplicate) safe.
+func (r *Registry) applyExitLocked(rec Record, code int, reason string, at time.Time, lines []string) {
+	if _, ok := r.exitIndex(rec.Token); ok {
+		return
+	}
+	r.forgetLocked(rec.Token)
+	r.exits = append(r.exits, Exit{
+		Record:    rec,
+		Code:      code,
+		Reason:    reason,
+		ExitedAt:  at,
+		LastLines: lines,
+	})
+	if len(r.exits) > maxExits {
+		r.exits = append([]Exit(nil), r.exits[len(r.exits)-maxExits:]...)
+	}
+}
+
+// exitIndex finds a token's exit record.
+func (r *Registry) exitIndex(token string) (int, bool) {
+	for i := range r.exits {
+		if r.exits[i].Token == token {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// addDiagLocked records a diagnostic, newest first, capped.
+func (r *Registry) addDiagLocked(d Diagnostic) {
+	if d.At.IsZero() {
+		d.At = r.clock()
+	}
+	r.diags = append([]Diagnostic{d}, r.diags...)
+	if len(r.diags) > maxDiagnostics {
+		r.diags = r.diags[:maxDiagnostics]
+	}
+}
+
+// Diagnostics returns the diagnostics, newest first.
+func (r *Registry) Diagnostics() []Diagnostic {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Diagnostic, len(r.diags))
+	copy(out, r.diags)
+	return out
+}
+
+// registerEvent builds the durable event for a register.
+func registerEvent(rec Record) event {
+	sr := encodeRecord(rec)
+	return event{Type: evRegister, Record: &sr}
+}
+
+// exitEvent builds the durable event for an exit.
+func exitEvent(rec Record, code int, reason string, lines []string) event {
+	sr := encodeRecord(rec)
+	return event{Type: evExit, Record: &sr, Code: code, Reason: reason, LastLines: lines}
+}
+
+// commitLocked durably commits ev and triggers compaction when due.
+//
+// Compaction happens BEFORE the commit: the snapshot must cover only the
+// already-installed state (the new event's in-memory change comes after the
+// commit), and the new event starts the fresh tail. Compacting after the
+// commit would snapshot state one event behind and then truncate that event
+// away, silently losing a run across restart.
+func (r *Registry) commitLocked(op string, ev event) error {
+	if !r.persist || r.j == nil {
+		return nil
+	}
+	if r.j.since >= compactAfter {
+		if err := r.j.compact(r); err != nil {
+			// Compaction is an optimization; the journal still holds the
+			// truth and the next commit tries again.
+		}
+	}
+	if err := r.j.commit(op, ev); err != nil {
+		return err
+	}
+	return nil
+}
+
+// closeRunLocked commits the exit and moves the run to history. It must not
+// be called for a token already in exits.
+func (r *Registry) closeRunLocked(rec Record, code int, reason string, at time.Time, lines []string) error {
+	if err := r.commitLocked("exit", exitEvent(rec, code, reason, lines)); err != nil {
+		return err
+	}
+	r.applyExitLocked(rec, code, reason, at, lines)
+	return nil
+}
+
+// Register records a run and returns it with its id filled in.
+//
+// Identity rules: a pid already claimed by a different token is verified; if
+// the old record's process is alive and matches, the new registration is
+// rejected (the old record is returned); if the old process is gone or the
+// pid has been reused by a different process, the old record is closed
+// (stale_identity in the reuse case) before the new run takes the pid. The
+// journal commit precedes the in-memory install.
 func (r *Registry) Register(rec Record) Record {
 	if rec.StartedAt.IsZero() {
 		rec.StartedAt = r.clock()
 	}
-	r.mu.Lock()
-	if existing, ok := r.runs[rec.PID]; ok && rec.ID == "" {
-		rec.ID = existing.ID
+	if rec.Token == "" {
+		rec.Token = newToken()
 	}
-	r.runs[rec.PID] = rec
+	if rec.Birth.IsZero() {
+		// Anchor the birth from the live process as early as possible.
+		if info := r.probe(rec.PID); info.Alive {
+			rec.Birth = info.Birth
+		}
+	}
+
+	r.mu.Lock()
+	if oldToken, ok := r.byPID[rec.PID]; ok && oldToken != rec.Token {
+		old := r.runs[oldToken]
+		switch st := r.statusOfLocked(old); st {
+		case runs.StatusAlive:
+			r.mu.Unlock()
+			// The live process at this pid belongs to the old identity.
+			return old
+		default:
+			reason := ReasonUnknown
+			if st == runs.StatusStale {
+				reason = ReasonStaleIdentity
+			}
+			now := r.clock()
+			if err := r.closeRunLocked(old, -1, reason, now, nil); err != nil {
+				r.mu.Unlock()
+				return Record{}
+			}
+			if st == runs.StatusStale {
+				r.addDiagLocked(Diagnostic{
+					Code: DiagStaleIdentity, PID: old.PID, Token: old.Token,
+					RunID: old.ID, At: now,
+					Detail: "pid reused by a different process before the new run registered",
+				})
+			}
+		}
+	}
+	if err := r.commitLocked("register", registerEvent(rec)); err != nil {
+		r.mu.Unlock()
+		return Record{}
+	}
+	r.installLocked(rec)
 	r.mu.Unlock()
 
 	r.mirrorAdd(rec)
@@ -112,47 +366,66 @@ func (r *Registry) Register(rec Record) Record {
 // Unregister drops the run with this pid, reporting whether there was one.
 func (r *Registry) Unregister(pid int) bool {
 	r.mu.Lock()
-	_, ok := r.runs[pid]
-	delete(r.runs, pid)
-	r.mu.Unlock()
-	if ok {
-		r.mirrorRemove(pid)
+	token, ok := r.byPID[pid]
+	if !ok {
+		r.mu.Unlock()
+		return false
 	}
-	return ok
+	if err := r.commitLocked("unregister", event{Type: evForget, Token: token, PIDs: []int{pid}}); err != nil {
+		r.mu.Unlock()
+		return false
+	}
+	r.forgetLocked(token)
+	r.mu.Unlock()
+
+	r.mirrorRemove(pid)
+	return true
 }
 
 // RenameGroups moves every run recorded under an old group name to its new one
 // (`groups.rename`), so a service started before its project was renamed stays
 // in the project's group instead of keeping a group of the old name to itself.
-// It reports how many runs moved.
+// It reports how many live runs moved.
 func (r *Registry) RenameGroups(renames map[string]string) int {
 	if len(renames) == 0 {
 		return 0
 	}
 	r.mu.Lock()
-	var moved []Record
-	for pid, rec := range r.runs {
+	moved := map[string]Record{}
+	for token, rec := range r.runs {
 		next, ok := renames[rec.Group]
 		if !ok || next == "" {
 			continue
 		}
 		rec.Group = next
-		r.runs[pid] = rec
-		moved = append(moved, rec)
+		r.runs[token] = rec
+		moved[token] = rec
+	}
+	if len(moved) > 0 {
+		if err := r.commitLocked("rename", event{Type: evRename, Renames: renames}); err != nil {
+			r.mu.Unlock()
+			return 0
+		}
 	}
 	for i := range r.exits {
 		if next, ok := renames[r.exits[i].Group]; ok && next != "" {
 			r.exits[i].Group = next
 		}
 	}
-	r.mu.Unlock()
+	out := make([]Record, 0, len(moved))
 	for _, rec := range moved {
+		out = append(out, rec)
+	}
+	r.mu.Unlock()
+
+	for _, rec := range out {
 		r.mirrorAdd(rec)
 	}
-	return len(moved)
+	return len(out)
 }
 
-// List returns the live runs, oldest first, after pruning dead ones.
+// List returns the live runs, oldest first, after reconciling them with the
+// live system (dead and identity-stale runs are closed).
 func (r *Registry) List() []Record {
 	r.Prune()
 	r.mu.Lock()
@@ -174,32 +447,59 @@ func (r *Registry) List() []Record {
 func (r *Registry) Lookup(pid int) (Record, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rec, ok := r.runs[pid]
+	token, ok := r.byPID[pid]
+	if !ok {
+		return Record{}, false
+	}
+	rec, ok := r.runs[token]
 	return rec, ok
 }
 
-// Prune drops every run whose process has exited. The scanner calls it each
-// tick; List and the resolver call it too, so a stale run never survives a
-// read.
+// Prune closes every run whose process has exited or whose identity no
+// longer matches. The scanner calls it each tick; List and the resolver call
+// it too, so a stale run never survives a read.
 func (r *Registry) Prune() {
-	alive := r.Alive
-	if alive == nil {
-		alive = runs.PIDAlive
-	}
-
 	r.mu.Lock()
-	var dead []int
-	for pid := range r.runs {
-		if !alive(pid) {
-			dead = append(dead, pid)
+	var closed []int
+	for {
+		type decision struct {
+			rec Record
+			st  runs.Status
 		}
-	}
-	for _, pid := range dead {
-		delete(r.runs, pid)
+		var gone []decision
+		for _, rec := range r.runs {
+			if st := r.statusOfLocked(rec); st != runs.StatusAlive {
+				gone = append(gone, decision{rec, st})
+			}
+		}
+		if len(gone) == 0 {
+			break
+		}
+		for _, d := range gone {
+			reason := ReasonUnknown
+			if d.st == runs.StatusStale {
+				reason = ReasonStaleIdentity
+			}
+			now := r.clock()
+			if err := r.closeRunLocked(d.rec, -1, reason, now, nil); err != nil {
+				// Simulated crash: leave all mutation to replay. Mirror
+				// removal is likewise deferred to the next open's rewrite.
+				r.mu.Unlock()
+				return
+			}
+			closed = append(closed, d.rec.PID)
+			if d.st == runs.StatusStale {
+				r.addDiagLocked(Diagnostic{
+					Code: DiagStaleIdentity, PID: d.rec.PID, Token: d.rec.Token,
+					RunID: d.rec.ID, At: now,
+					Detail: "pid reused by a different process while the run was live",
+				})
+			}
+		}
 	}
 	r.mu.Unlock()
 
-	for _, pid := range dead {
+	for _, pid := range closed {
 		r.mirrorRemove(pid)
 	}
 }
@@ -238,9 +538,9 @@ func (r *Registry) PortHint(group, service string) (int, bool) {
 	return 0, false
 }
 
-// GroupPIDs lists the live runs recorded under a group, so `sonar down` can
-// stop the ones that hold no port — a worker, or a service still starting —
-// which a kill by port never reaches.
+// GroupPIDs lists the verified live runs recorded under a group, so `sonar
+// down` can stop the ones that hold no port — a worker, or a service still
+// starting — which a kill by port never reaches.
 func (r *Registry) GroupPIDs(group string) []int {
 	var out []int
 	for _, rec := range r.List() {
@@ -249,6 +549,75 @@ func (r *Registry) GroupPIDs(group string) []int {
 		}
 	}
 	return out
+}
+
+// PID identity answers for kill-path callers.
+const (
+	PIDAliveResult = "alive"
+	PIDDeadResult  = "dead"
+	PIDStaleResult = "stale"
+)
+
+// PIDIdentity reports whether a pid is safe to signal ("alive": the process
+// matches the run, or the pid is unknown to sonar), gone ("dead"), or reused
+// by a different process ("stale": must not be signaled).
+func (r *Registry) PIDIdentity(pid int) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	token, ok := r.byPID[pid]
+	if !ok {
+		return PIDAliveResult
+	}
+	switch r.statusOfLocked(r.runs[token]) {
+	case runs.StatusDead:
+		return PIDDeadResult
+	case runs.StatusStale:
+		return PIDStaleResult
+	default:
+		return PIDAliveResult
+	}
+}
+
+// PIDGuard is the kill-path gate: it returns the pids among pids that are safe
+// to signal (unknown pids and verified runs). A pid held by a run whose
+// identity no longer matches is blocked and gets one stale_identity
+// diagnostic, so a reused pid is never signaled. Dead pids are passed
+// through so the killer reports them as not found, as it always has.
+func (r *Registry) PIDGuard(pids []int) []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int, 0, len(pids))
+	seen := map[int]bool{}
+	for _, pid := range pids {
+		if seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		token, ok := r.byPID[pid]
+		if !ok {
+			out = append(out, pid)
+			continue
+		}
+		rec := r.runs[token]
+		if runs.VerifyInfo(r.probe(pid), token, rec.Birth) == runs.StatusStale {
+			r.addDiagLocked(Diagnostic{
+				Code: DiagStaleIdentity, PID: pid, Token: token, RunID: rec.ID,
+				Detail: "kill blocked: pid reused by a different process; no signal sent",
+			})
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out
+}
+
+// Compact forces a snapshot compaction. Used on graceful daemon shutdown.
+func (r *Registry) Compact() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.persist && r.j != nil {
+		_ = r.j.compact(r)
+	}
 }
 
 // Session implements groups.SessionRegistry: it reports the agent session that
@@ -343,41 +712,6 @@ func (r *Registry) parentTable() map[int]int {
 	return table
 }
 
-// ImportLegacy takes ownership of ~/.config/sonar/runs.json: every live entry
-// becomes a run in this registry and the file is deleted, then rewritten from
-// the registry, so a `sonar start` that ran without a daemon is not lost when
-// one appears (daemon spec, migration table).
-func (r *Registry) ImportLegacy() int {
-	reg := runs.Load() // prunes dead pids on the way in
-	imported := 0
-	for _, e := range reg.Active() {
-		rec := Record{
-			ID:       e.ID,
-			PID:      e.PID,
-			PPID:     e.PPID,
-			Group:    e.GroupOf(),
-			Name:     e.NameOf(),
-			Cmd:      e.Cmd,
-			Cwd:      e.Cwd,
-			PortHint: e.PortHint,
-		}
-		if t, err := time.Parse(time.RFC3339, e.StartedAt); err == nil {
-			rec.StartedAt = t
-		}
-		r.mu.Lock()
-		r.runs[rec.PID] = rec
-		r.mu.Unlock()
-		imported++
-	}
-	_ = os.Remove(runs.Path())
-	if imported > 0 {
-		for _, rec := range r.List() {
-			r.mirrorAdd(rec)
-		}
-	}
-	return imported
-}
-
 // mirrorAdd writes one run through to runs.json.
 func (r *Registry) mirrorAdd(rec Record) {
 	if !r.Mirror {
@@ -394,6 +728,8 @@ func (r *Registry) mirrorAdd(rec Record) {
 		Cwd:       rec.Cwd,
 		PPID:      rec.PPID,
 		PortHint:  rec.PortHint,
+		Token:     rec.Token,
+		Birth:     runs.FormatTime(rec.Birth),
 	})
 }
 

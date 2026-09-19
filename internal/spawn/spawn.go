@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/raskrebs/sonar/internal/runs"
 	"github.com/raskrebs/sonar/internal/state"
 )
 
@@ -66,6 +67,10 @@ type Request struct {
 	// Detach runs the child in its own session with stdout and stderr in the
 	// run's log file, so it survives the process that started it.
 	Detach bool
+	// Token presets the run's start token; empty generates one. It is put in
+	// the child's environment (SONAR_START_TOKEN) and is, with the process
+	// birth time, the identity sonar verifies before attributing or killing.
+	Token string
 	// ID presets the run id; empty generates one.
 	ID string
 	// LogPath overrides the detached log file. Empty uses LogPath(group, name).
@@ -79,6 +84,7 @@ type Request struct {
 // Handle is a started run: everything the registry needs, plus the process.
 type Handle struct {
 	ID        string
+	Token     string
 	PID       int
 	PPID      int
 	Group     string
@@ -87,7 +93,10 @@ type Handle struct {
 	Cwd       string
 	PortHint  int
 	StartedAt time.Time
-	LogPath   string
+	// Birth is the process creation time observed right after start, the
+	// platform-independent identity evidence alongside Token.
+	Birth    time.Time
+	LogPath  string
 	// LogOffset is how long LogPath was when this run opened it: the file is
 	// appended to across runs, so this run's output begins here.
 	LogOffset int64
@@ -123,9 +132,14 @@ func Spawn(ctx context.Context, req Request) (*Handle, error) {
 	if id == "" {
 		id = NewID()
 	}
+	token := req.Token
+	if token == "" {
+		token = newStartToken()
+	}
 
 	h := &Handle{
 		ID:        id,
+		Token:     token,
 		PPID:      os.Getpid(),
 		Group:     req.Group,
 		Name:      req.Name,
@@ -146,7 +160,7 @@ func Spawn(ctx context.Context, req Request) (*Handle, error) {
 		}
 	}
 	cmd.Dir = cwd
-	cmd.Env = childEnv(req, id)
+	cmd.Env = childEnv(req, id, token)
 
 	if req.Detach {
 		path := req.LogPath
@@ -200,6 +214,11 @@ func Spawn(ctx context.Context, req Request) (*Handle, error) {
 
 	h.cmd = cmd
 	h.PID = cmd.Process.Pid
+	// Read the birth time while the child is certainly this process; it is
+	// the identity evidence kept with the token.
+	if info := runs.Probe(h.PID); info.Alive {
+		h.Birth = info.Birth
+	}
 	if h.log != nil && req.Detach {
 		// The child owns the file descriptor now.
 		h.log.Close()
@@ -208,18 +227,30 @@ func Spawn(ctx context.Context, req Request) (*Handle, error) {
 	return h, nil
 }
 
+// newStartToken returns a random start token.
+func newStartToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "st" + strconv.Itoa(os.Getpid())
+	}
+	return "st" + hex.EncodeToString(b[:])
+}
+
 // childEnv is the caller's environment plus the run's identity.
-func childEnv(req Request, id string) []string {
+func childEnv(req Request, id, token string) []string {
 	base := req.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	drop := map[string]bool{EnvGroup: true, EnvName: true, EnvRunID: true, EnvPortHint: true}
+	drop := map[string]bool{
+		EnvGroup: true, EnvName: true, EnvRunID: true, EnvPortHint: true,
+		runs.EnvStartToken: true,
+	}
 	if req.Session.ID != "" {
 		drop[EnvSession] = true
 		drop[EnvSessionLabel] = true
 	}
-	out := make([]string, 0, len(base)+4)
+	out := make([]string, 0, len(base)+5)
 	for _, kv := range base {
 		if key, _, ok := strings.Cut(kv, "="); ok && drop[key] {
 			continue
@@ -227,6 +258,7 @@ func childEnv(req Request, id string) []string {
 		out = append(out, kv)
 	}
 	out = append(out, EnvGroup+"="+req.Group, EnvName+"="+req.Name, EnvRunID+"="+id)
+	out = append(out, runs.EnvStartToken+"="+token)
 	if req.PortHint > 0 {
 		out = append(out, EnvPortHint+"="+strconv.Itoa(req.PortHint))
 	}

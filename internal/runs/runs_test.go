@@ -90,25 +90,46 @@ func TestLoadPrunesDeadPIDs(t *testing.T) {
 	}
 
 	// Prune should have persisted: re-reading the file shows only the live pid.
-	reg2 := load()
+	reg2, rep2 := loadChecked(Path())
+	if rep2.Quarantined {
+		t.Errorf("valid file was quarantined: %s", rep2.Reason)
+	}
 	if _, ok := reg2.Runs[dead]; ok {
 		t.Error("dead pid not removed from disk after prune")
 	}
 }
 
-func TestLoadMalformedFileRecovers(t *testing.T) {
+// TestLoadMalformedFileIsQuarantined: a truncated or malformed file must be
+// moved aside and reported, never silently replaced with an empty registry.
+func TestLoadMalformedFileIsQuarantined(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".config", "sonar")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "runs.json"), []byte("{not json"), 0o644); err != nil {
+	path := filepath.Join(dir, "runs.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reg := Load()
-	if reg == nil || reg.Runs == nil || len(reg.Runs) != 0 {
-		t.Errorf("malformed file should recover to empty registry, got %+v", reg)
+	reg, rep := LoadChecked()
+	if !rep.Quarantined {
+		t.Fatal("a damaged file was not quarantined and would be silently emptied")
+	}
+	if rep.Reason == "" {
+		t.Error("the quarantine report gives no reason")
+	}
+	if rep.Backup == "" {
+		t.Fatal("no backup path was reported")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("the damaged file was not moved aside")
+	}
+	if data, err := os.ReadFile(rep.Backup); err != nil || string(data) != "{not json" {
+		t.Errorf("backup contents = %q, %v", data, err)
+	}
+	if len(reg.Runs) != 0 {
+		t.Errorf("quarantine should recover to an empty registry, got %+v", reg.Runs)
 	}
 }
 

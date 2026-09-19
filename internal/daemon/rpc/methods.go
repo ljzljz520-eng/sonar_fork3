@@ -615,6 +615,11 @@ type RunsRegisterParams struct {
 	PortHint  *int    `json:"port_hint,omitempty"`
 	StartedAt string  `json:"started_at"`
 	ID        *string `json:"id,omitempty"`
+	// Token and Birth carry the process identity: the start token the child
+	// got in SONAR_START_TOKEN and the kernel-reported creation time. A
+	// reregistered PID is only taken over when both still match.
+	Token string `json:"token,omitempty"`
+	Birth string `json:"birth,omitempty"`
 	// Session is the agent session that asked for this run (spec 2 §3). The
 	// caller detects it: `sonar start` reads its own environment, which is the
 	// agent's, while the daemon's is not.

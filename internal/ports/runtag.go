@@ -55,6 +55,14 @@ func (t *runTagger) walk(pid int, pidInfo map[int]pidEntry, depth int) tagResult
 
 	// Direct hit: this PID is itself a tagged run.
 	if e, ok := t.reg.LookupByPID(pid); ok {
+		// The PID may have been reused after the recorded run ended: verify
+		// identity before attributing, so a different process holding the
+		// same PID is never tagged as the old run.
+		if (e.Token != "" || e.Birth != "") &&
+			runs.Verify(pid, e.Token, runs.ParseTime(e.Birth)) == runs.StatusStale {
+			t.cache[pid] = tagResult{}
+			return tagResult{}
+		}
 		res := tagResult{tag: e.NameOf(), group: e.GroupOf(), id: e.ID, rootPID: e.PID, startedAt: e.StartedAt, ok: true}
 		t.cache[pid] = res
 		return res

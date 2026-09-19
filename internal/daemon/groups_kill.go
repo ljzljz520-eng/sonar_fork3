@@ -79,6 +79,9 @@ func handleGroupsKill(ctx context.Context, req *Request) (any, error) {
 		for _, pid := range req.Runtime.Runs().GroupPIDs(name) {
 			pidTargets = append(pidTargets, killer.Target{PID: pid})
 		}
+		var blocked []state.KillResult
+		pidTargets, blocked = guardPIDTargets(req.Runtime.Runs(), pidTargets)
+		rows = append(rows, blocked...)
 		if len(pidTargets) > 0 {
 			tree := opts
 			tree.Tree = true

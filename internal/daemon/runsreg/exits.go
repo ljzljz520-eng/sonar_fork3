@@ -10,6 +10,7 @@ import (
 
 	"github.com/raskrebs/sonar/internal/daemon"
 	"github.com/raskrebs/sonar/internal/daemon/rpc"
+	"github.com/raskrebs/sonar/internal/runs"
 	"github.com/raskrebs/sonar/internal/state"
 )
 
@@ -19,6 +20,12 @@ const (
 	ReasonExited  = "exited"
 	ReasonCrashed = "crashed"
 	ReasonStopped = "stopped"
+	// ReasonUnknown closes a run whose process was gone when sonar next
+	// looked: it never saw the exit, so it has no code to report.
+	ReasonUnknown = "unknown"
+	// ReasonStaleIdentity closes a run whose pid was found to belong to a
+	// different process: the old run is over rather than crashed.
+	ReasonStaleIdentity = "stale_identity"
 )
 
 const (
@@ -84,6 +91,10 @@ func exitReason(code int, stopped bool) string {
 // the exit history, with the last lines of its log. stopped says it was asked
 // to stop — a Ctrl+C, `sonar kill`, `sonar down` — so a non-zero code is not a
 // crash. It reports false for a pid that was not registered.
+//
+// The exit event is journaled before the in-memory state changes, so a crash
+// leaves files that replay to one exit and never a run that is both live and
+// exited.
 func (r *Registry) Exited(pid, code int, stopped bool) (Exit, bool) {
 	rec, ok := r.Lookup(pid)
 	if !ok {
@@ -94,25 +105,24 @@ func (r *Registry) Exited(pid, code int, stopped bool) (Exit, bool) {
 		lines = tailLines(rec.LogPath, rec.LogOffset, lastLineCount)
 	}
 	now := r.clock()
+	reason := exitReason(code, stopped || rec.stopping)
+
+	ev := exitEvent(rec, code, reason, lines)
+	ev.At = runs.FormatTime(now)
 
 	r.mu.Lock()
-	rec, ok = r.runs[pid]
+	rec, ok = r.runs[rec.Token]
 	if !ok {
 		r.mu.Unlock()
 		return Exit{}, false
 	}
-	delete(r.runs, pid)
-	e := Exit{
-		Record:    rec,
-		Code:      code,
-		Reason:    exitReason(code, stopped || rec.stopping),
-		ExitedAt:  now,
-		LastLines: lines,
+	if err := r.commitLocked("exit", ev); err != nil {
+		// A journal crash point: no in-memory mutation; replay owns it.
+		r.mu.Unlock()
+		return Exit{}, false
 	}
-	r.exits = append(r.exits, e)
-	if len(r.exits) > maxExits {
-		r.exits = append([]Exit(nil), r.exits[len(r.exits)-maxExits:]...)
-	}
+	r.applyExitLocked(rec, code, reason, now, lines)
+	e := Exit{Record: rec, Code: code, Reason: reason, ExitedAt: now, LastLines: lines}
 	r.mu.Unlock()
 
 	r.mirrorRemove(pid)
@@ -120,16 +130,26 @@ func (r *Registry) Exited(pid, code int, stopped bool) (Exit, bool) {
 }
 
 // Stopping marks runs sonar is about to stop, so their exit is recorded as
-// stopped rather than a crash. A run that already exited has its record
-// corrected instead, as long as it ended moments ago.
+// stopped rather than a crash. The marks are journaled so they survive a
+// restart between the kill request and the actual signal. A run that already
+// exited has its record corrected instead, as long as it ended moments ago.
 func (r *Registry) Stopping(pids []int) {
 	now := r.clock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	marked := []string{}
+	seen := map[string]bool{}
 	for _, pid := range pids {
-		if rec, ok := r.runs[pid]; ok {
-			rec.stopping = true
-			r.runs[pid] = rec
+		token, ok := r.byPID[pid]
+		if ok {
+			rec := r.runs[token]
+			if !rec.stopping {
+				rec.stopping = true
+				r.runs[token] = rec
+				if !seen[token] {
+					seen[token] = true
+					marked = append(marked, token)
+				}
+			}
 			continue
 		}
 		for i := len(r.exits) - 1; i >= 0; i-- {
@@ -139,6 +159,10 @@ func (r *Registry) Stopping(pids []int) {
 			}
 		}
 	}
+	if len(marked) > 0 {
+		_ = r.commitLocked("stopping", event{Type: evStopping, Tokens: marked})
+	}
+	r.mu.Unlock()
 }
 
 // LastExit implements groups.ExitHistory: how the latest run of a service

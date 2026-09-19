@@ -6,9 +6,19 @@
 // The registry lives next to sonar's config (e.g. ~/.config/sonar/runs.json).
 // Writes are serialized with a sidecar lock file and an atomic rename so that
 // multiple concurrent `sonar run` invocations don't clobber each other.
+//
+// A PID alone is not an identity: the OS reuses PIDs, so every entry also
+// carries a random start token (in the child's environment) and the process's
+// kernel-reported birth time. Pruning and port attribution match that
+// identity; a PID that has been reused by a different process is reported as
+// stale, never attributed or killed. A file that cannot be parsed or fails
+// validation is quarantined (renamed aside) and reported, never silently
+// replaced with an empty registry.
 package runs
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,6 +32,9 @@ import (
 // They are all omitempty, so a file written by an older `sonar run` still
 // loads: Tag then stands for both the group and the name, which is exactly the
 // migration `sonar run --tag X` -> `sonar start --group X` promises.
+//
+// Token and Birth are the process identity: a random start token embedded in
+// the child and the observed process creation time (RFC3339Nano UTC).
 type Entry struct {
 	PID       int    `json:"pid"`
 	Tag       string `json:"tag"`
@@ -33,6 +46,8 @@ type Entry struct {
 	Cwd       string `json:"cwd,omitempty"`
 	PPID      int    `json:"ppid,omitempty"`
 	PortHint  int    `json:"portHint,omitempty"`
+	Token     string `json:"token,omitempty"`
+	Birth     string `json:"birth,omitempty"` // RFC3339Nano UTC
 }
 
 // GroupOf is the group this run attributes its ports to.
@@ -72,48 +87,154 @@ func lockPath() string {
 	return Path() + ".lock"
 }
 
-// load reads the registry from path without pruning. A missing file yields an
-// empty registry. A malformed file is treated as empty (best-effort recovery)
-// rather than an error, so a corrupted registry never breaks `sonar list`.
-func load() *Registry {
-	reg := &Registry{Runs: map[int]Entry{}}
-	data, err := os.ReadFile(Path())
+// StaleEntry names an entry pruned because its PID had been reused by a
+// different process.
+type StaleEntry struct {
+	PID   int
+	ID    string
+	Token string
+}
+
+// Report says what happened while loading, beyond a normal clean read.
+type Report struct {
+	// Quarantined says the file was unreadable, truncated or structurally
+	// invalid: it was moved aside rather than treated as empty.
+	Quarantined bool
+	Path        string
+	Backup      string
+	Reason      string
+	// Stale lists entries whose PID was reused by a different (alive) process.
+	Stale []StaleEntry
+}
+
+// loadChecked reads path without pruning. A missing file yields an empty
+// registry. A truncated, malformed or invalid file is quarantined (renamed
+// aside) and reported, never silently treated as empty.
+func loadChecked(path string) (*Registry, *Report) {
+	rep := &Report{Path: path}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return reg
+		if os.IsNotExist(err) {
+			return &Registry{Runs: map[int]Entry{}}, rep
+		}
+		// Unreadable (permissions, I/O): quarantine so a later save cannot
+		// overwrite a file we could not inspect.
+		quarantine(path, rep, "unreadable: "+err.Error())
+		return &Registry{Runs: map[int]Entry{}}, rep
 	}
-	if err := json.Unmarshal(data, reg); err != nil || reg.Runs == nil {
-		return &Registry{Runs: map[int]Entry{}}
+	reg := &Registry{Runs: map[int]Entry{}}
+	if err := json.Unmarshal(data, reg); err != nil {
+		quarantine(path, rep, "parse error: "+err.Error())
+		return &Registry{Runs: map[int]Entry{}}, rep
 	}
+	if reg.Runs == nil {
+		return reg, rep
+	}
+	for key, e := range reg.Runs {
+		if reason := invalidEntry(key, e); reason != "" {
+			quarantine(path, rep, reason)
+			return &Registry{Runs: map[int]Entry{}}, rep
+		}
+	}
+	return reg, rep
+}
+
+// invalidEntry validates one record structurally.
+func invalidEntry(key int, e Entry) string {
+	if e.PID <= 0 {
+		return fmt.Sprintf("invalid entry at pid %d: pid field is %d", key, e.PID)
+	}
+	if e.PID != key {
+		return fmt.Sprintf("invalid entry at pid %d: pid field disagrees (%d)", key, e.PID)
+	}
+	if e.StartedAt != "" {
+		if _, err := time.Parse(time.RFC3339, e.StartedAt); err != nil {
+			return fmt.Sprintf("invalid entry at pid %d: unparseable startedAt %q", key, e.StartedAt)
+		}
+	}
+	if e.Birth != "" && ParseTime(e.Birth).IsZero() {
+		return fmt.Sprintf("invalid entry at pid %d: unparseable birth %q", key, e.Birth)
+	}
+	return ""
+}
+
+// quarantine moves path aside to a timestamped backup and fills the report.
+func quarantine(path string, rep *Report, reason string) {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	backup := fmt.Sprintf("%s.corrupt-%s-%s", path,
+		time.Now().UTC().Format("20060101T150405.000000000"), hex.EncodeToString(b[:]))
+	if err := os.Rename(path, backup); err != nil {
+		backup = "" // leave the damaged file in place; the reason is still reported
+	}
+	rep.Quarantined, rep.Backup, rep.Reason = true, backup, reason
+}
+
+// LoadChecked reads the registry and reconciles it with the live system:
+// entries whose process is gone or whose identity no longer matches (a reused
+// PID) are pruned and written back so the file self-heals. Persistence
+// failures are ignored.
+func LoadChecked() (*Registry, *Report) {
+	fast, rep := loadChecked(Path())
+	// The fast read already isolated the file: do not read it again under
+	// the lock, or the now-missing file would look like a clean, empty one.
+	if rep.Quarantined {
+		return fast, rep
+	}
+	needLock := false
+	for pid, e := range fast.Runs {
+		if Verify(pid, e.Token, ParseTime(e.Birth)) != StatusAlive {
+			needLock = true
+			break
+		}
+	}
+	if !needLock {
+		return fast, rep
+	}
+
+	out := fast
+	_ = withLock(func() error {
+		fresh, locked := loadChecked(Path())
+		// A file replaced by something invalid under the lock updates the
+		// report; a missing file (ours moved moments ago) must not erase it.
+		if locked.Quarantined {
+			rep.Quarantined, rep.Backup, rep.Reason = true, locked.Backup, locked.Reason
+		}
+		changed := false
+		for pid, e := range fresh.Runs {
+			switch Verify(pid, e.Token, ParseTime(e.Birth)) {
+			case StatusDead:
+				delete(fresh.Runs, pid)
+				changed = true
+			case StatusStale:
+				rep.Stale = append(rep.Stale, StaleEntry{PID: pid, ID: e.ID, Token: e.Token})
+				delete(fresh.Runs, pid)
+				changed = true
+			}
+		}
+		if changed {
+			_ = save(fresh)
+		}
+		out = fresh
+		return nil
+	})
+	return out, rep
+}
+
+// Load reads the registry and prunes dead/non-matching entries (stale after a
+// crash, hard kill or PID reuse). Pruned entries are written back to disk so
+// the file self-heals; quarantine and stale reports are discarded by callers
+// that only want the registry.
+func Load() *Registry {
+	reg, _ := LoadChecked()
 	return reg
 }
 
-// Load reads the registry and prunes entries whose PID is no longer alive
-// (stale after a crash or hard kill). Pruned entries are written back to disk
-// so the file self-heals. Pruning failures to persist are ignored.
-func Load() *Registry {
-	reg := load()
-	pruned := false
-	for pid := range reg.Runs {
-		if !pidAlive(pid) {
-			delete(reg.Runs, pid)
-			pruned = true
-		}
-	}
-	if pruned {
-		_ = withLock(func() error {
-			// Re-read under lock and re-prune to avoid racing a concurrent add.
-			fresh := load()
-			for pid := range fresh.Runs {
-				if !pidAlive(pid) {
-					delete(fresh.Runs, pid)
-				}
-			}
-			reg = fresh
-			return save(fresh)
-		})
-	}
-	return reg
-}
+// LoadRaw reads the file with validation and quarantine but without pruning
+// entries against the live system and without writing it back. Callers that
+// verify identity with their own probe (the daemon's legacy import) use it so
+// the package-global probe cannot silently drop entries first.
+func LoadRaw() (*Registry, *Report) { return loadChecked(Path()) }
 
 // LookupByPID returns the entry for a PID if present.
 func (r *Registry) LookupByPID(pid int) (Entry, bool) {
@@ -139,8 +260,24 @@ func Add(e Entry) error {
 		e.StartedAt = time.Now().Format(time.RFC3339)
 	}
 	return withLock(func() error {
-		reg := load()
+		reg, _ := loadChecked(Path())
 		reg.Runs[e.PID] = e
+		return save(reg)
+	})
+}
+
+// Replace writes entries as the whole registry, atomically and under lock.
+// Used by the daemon to rewrite the mirror after importing or reconciling
+// state, so no stale legacy entry can linger in the file.
+func Replace(entries []Entry) error {
+	return withLock(func() error {
+		reg := &Registry{Runs: map[int]Entry{}}
+		for _, e := range entries {
+			if e.PID <= 0 {
+				continue
+			}
+			reg.Runs[e.PID] = e
+		}
 		return save(reg)
 	})
 }
@@ -149,7 +286,7 @@ func Add(e Entry) error {
 // missing pid is a no-op.
 func Remove(pid int) error {
 	return withLock(func() error {
-		reg := load()
+		reg, _ := loadChecked(Path())
 		if _, ok := reg.Runs[pid]; !ok {
 			return nil
 		}
@@ -194,5 +331,6 @@ func save(reg *Registry) error {
 }
 
 // PIDAlive reports whether a process is still running. The daemon's in-memory
-// registry prunes with the same test the on-disk one uses.
+// registry prunes with the same existence test where identity evidence is not
+// available.
 func PIDAlive(pid int) bool { return pidAlive(pid) }

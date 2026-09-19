@@ -6,8 +6,7 @@ import "testing"
 // project was renamed follows the rename instead of keeping a group of the old
 // name to itself.
 func TestRenameGroupsMovesRunsWithTheProject(t *testing.T) {
-	r := New()
-	r.Mirror = false
+	r := testRegistry(101, 102, 103)
 	r.Register(Record{PID: 101, Group: "shop", Name: "api"})
 	r.Register(Record{PID: 102, Group: "shop@feat", Name: "api"})
 	r.Register(Record{PID: 103, Group: "other", Name: "job"})

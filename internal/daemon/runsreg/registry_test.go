@@ -1,8 +1,7 @@
 package runsreg
 
 import (
-	"encoding/json"
-	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -10,16 +9,43 @@ import (
 	"github.com/raskrebs/sonar/internal/state"
 )
 
-// testRegistry is a registry with no process table and no runs.json behind it.
+// itoa formats n (test helper, cheaper than fmt.Sprintf in loops).
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// testRegistry is a registry with no mirror, no process table and a probe
+// that reports every pid in alive as alive without identity evidence (the
+// conservative path).
 func testRegistry(alive ...int) *Registry {
-	live := map[int]bool{}
+	info := map[int]runs.Info{}
 	for _, pid := range alive {
-		live[pid] = true
+		info[pid] = runs.Info{PID: pid, Alive: true}
 	}
 	r := New()
 	r.Mirror = false
-	r.Alive = func(pid int) bool { return live[pid] }
+	r.Probe = fakeProbe(info)
 	r.Parents = func() map[int]int { return nil }
+	return r
+}
+
+// fakeProbe answers pid from info; unknown pids are dead.
+func fakeProbe(info map[int]runs.Info) func(int) runs.Info {
+	return func(pid int) runs.Info {
+		if i, ok := info[pid]; ok {
+			return i
+		}
+		return runs.Info{PID: pid}
+	}
+}
+
+func aliveInfo(pid int, token string, birth time.Time) runs.Info {
+	return runs.Info{PID: pid, Alive: true, Token: token, Birth: birth}
+}
+
+// identityRegistry reports one pid carrying token and birth, the live shape
+// for PID-reuse tests.
+func identityRegistry(pid int, token string, birth time.Time) *Registry {
+	r := testRegistry()
+	r.Probe = fakeProbe(map[int]runs.Info{pid: aliveInfo(pid, token, birth)})
 	return r
 }
 
@@ -49,19 +75,91 @@ func TestRegisterListAndUnregister(t *testing.T) {
 	}
 }
 
-func TestRegisterKeepsTheIDOfAReregisteredPID(t *testing.T) {
-	r := testRegistry(100)
-	r.Register(Record{ID: "keep", PID: 100, Group: "g", Name: "web"})
-	rec := r.Register(Record{PID: 100, Group: "g", Name: "web"})
-	if rec.ID != "keep" {
-		t.Fatalf("id = %q, want keep", rec.ID)
+// TestRegisterRejectsAnAlivePIDOwnedByAnotherToken: the new registration
+// must not take over a verified live process; the old record is returned.
+func TestRegisterRejectsAnAlivePIDOwnedByAnotherToken(t *testing.T) {
+	birth := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	r := identityRegistry(100, "old-token", birth)
+	r.Register(Record{ID: "keep", Token: "old-token", PID: 100, Group: "g", Name: "web", Birth: birth})
+
+	got := r.Register(Record{ID: "new", Token: "new-token", PID: 100, Group: "g", Name: "web"})
+	if got.Token != "old-token" {
+		t.Fatalf("registration returned %q, want the old owner", got.Token)
+	}
+	if len(r.List()) != 1 || r.List()[0].Token != "old-token" {
+		t.Fatalf("a second live owner appeared: %+v", r.List())
 	}
 }
 
+// TestRegisterClosesADeadPIDBeforeTakingIt: the old run is recorded as an
+// exit (unknown) and the new run owns the pid, with one owner and one exit.
+func TestRegisterClosesADeadPIDBeforeTakingIt(t *testing.T) {
+	r := testRegistry(100)
+	r.Register(Record{ID: "old", Token: "old-token", PID: 100, Group: "g", Name: "web",
+		Birth: time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)})
+	// The old process is gone; the new one then takes the pid. The first
+	// probe sees the empty slot, later probes the new process (the spawn
+	// handler supplies its token and birth, as here).
+	calls := 0
+	r.Probe = func(pid int) runs.Info {
+		if pid != 100 {
+			return runs.Info{PID: pid}
+		}
+		calls++
+		if calls == 1 {
+			return runs.Info{PID: 100} // old owner verified as gone
+		}
+		return aliveInfo(100, "new-token", birth2)
+	}
+
+	got := r.Register(Record{ID: "new", Token: "new-token", PID: 100, Group: "g", Name: "api", Birth: birth2})
+	if got.Token != "new-token" {
+		t.Fatalf("new register = %+v", got)
+	}
+	live := r.List()
+	if len(live) != 1 || live[0].Token != "new-token" {
+		t.Fatalf("live owners after takeover: %+v", live)
+	}
+	exits := r.Exits()
+	if len(exits) != 1 || exits[0].Token != "old-token" || exits[0].Reason != ReasonUnknown {
+		t.Fatalf("exits = %+v, want one unknown exit for the old run", exits)
+	}
+}
+
+// TestRegisterOnAReusedPIDReportsStaleIdentity: same pid, different process
+// (different token): the old run must not own or be confused with the new one,
+// it is closed as stale_identity and an explicit diagnostic is produced.
+func TestRegisterOnAReusedPIDReportsStaleIdentity(t *testing.T) {
+	birth1 := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	birth2 := birth1.Add(time.Hour)
+	r := identityRegistry(100, "new-token", birth2)
+	r.Register(Record{ID: "old", Token: "old-token", PID: 100, Group: "g", Name: "web", Birth: birth1})
+
+	got := r.Register(Record{ID: "new", Token: "new-token", PID: 100, Group: "g", Name: "api", Birth: birth2})
+	if got.Token != "new-token" {
+		t.Fatalf("new register = %+v, want the new run", got)
+	}
+	live := r.List()
+	if len(live) != 1 || live[0].Token != "new-token" {
+		t.Fatalf("live owners = %+v, want exactly the new run", live)
+	}
+	exits := r.Exits()
+	if len(exits) != 1 {
+		t.Fatalf("exits = %+v, want one", exits)
+	}
+	if exits[0].Token != "old-token" || exits[0].Reason != ReasonStaleIdentity {
+		t.Fatalf("old run exit = %+v, want stale_identity", exits[0])
+	}
+	if !hasDiag(r, DiagStaleIdentity, 100) {
+		t.Fatalf("no stale_identity diagnostic in %+v", r.Diagnostics())
+	}
+}
+
+// TestPruneDropsDeadRuns.
 func TestPruneDropsDeadRuns(t *testing.T) {
 	r := testRegistry(100)
-	r.Register(Record{ID: "a", PID: 100, Group: "g", Name: "web"})
-	r.Register(Record{ID: "b", PID: 999, Group: "g", Name: "gone"})
+	r.Register(Record{ID: "a", Token: "ta", PID: 100, Group: "g", Name: "web"})
+	r.Register(Record{ID: "b", Token: "tb", PID: 999, Group: "g", Name: "gone"})
 
 	r.Prune()
 	got := r.List()
@@ -70,9 +168,30 @@ func TestPruneDropsDeadRuns(t *testing.T) {
 	}
 }
 
+// TestPruneOnPIDReuseReportsStaleIdentity: while the run was live its pid
+// was reused by a process carrying a different token.
+func TestPruneOnPIDReuseReportsStaleIdentity(t *testing.T) {
+	birth1 := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	birth2 := birth1.Add(2 * time.Hour)
+	r := identityRegistry(100, "different", birth2)
+	r.Register(Record{ID: "a", Token: "old-token", PID: 100, Group: "g", Name: "web", Birth: birth1})
+
+	r.Prune()
+	if live := r.List(); len(live) != 0 {
+		t.Fatalf("the stale run survived pruning: %+v", live)
+	}
+	exits := r.Exits()
+	if len(exits) != 1 || exits[0].Reason != ReasonStaleIdentity {
+		t.Fatalf("exits = %+v, want one stale_identity", exits)
+	}
+	if !hasDiag(r, DiagStaleIdentity, 100) {
+		t.Fatalf("missing stale_identity diagnostic: %+v", r.Diagnostics())
+	}
+}
+
 func TestRunAttributesAPortByItsPPIDAncestry(t *testing.T) {
 	r := testRegistry(100)
-	r.Register(Record{ID: "a", PID: 100, Group: "itest", Name: "web"})
+	r.Register(Record{ID: "a", Token: "ta", PID: 100, Group: "itest", Name: "web"})
 	// sonar start (100) -> npm (200) -> node (300) -> esbuild (400)
 	r.Parents = func() map[int]int { return map[int]int{400: 300, 300: 200, 200: 100} }
 
@@ -87,13 +206,10 @@ func TestRunAttributesAPortByItsPPIDAncestry(t *testing.T) {
 }
 
 // TestRunAttributesTheLinuxScannerShape is the shape a Linux scan hands the
-// resolver: `ss -tlnp` reports the listening pid and nothing else, so the row
-// arrives with PPID 0 and no run of its own. Attribution then has only the
-// process table to work with, and it has to reach the `sonar start` that owns
-// the listener through it.
+// resolver: `ss -tlnp` reports the listening pid and nothing else.
 func TestRunAttributesTheLinuxScannerShape(t *testing.T) {
-	r := testRegistry(100)
-	r.Register(Record{ID: "a", PID: 100, Group: "itest", Name: "web"})
+	r := testRegistry(100, 300)
+	r.Register(Record{ID: "a", Token: "ta", PID: 100, Group: "itest", Name: "web"})
 	// sonar start (100) -> the listener it spawned (300). ss gave no ppid.
 	r.Parents = func() map[int]int { return map[int]int{300: 100, 100: 42} }
 
@@ -107,12 +223,10 @@ func TestRunAttributesTheLinuxScannerShape(t *testing.T) {
 }
 
 // TestRunAttributesTheRegisteredPIDItself covers `sonar start` in the
-// foreground: the run is registered under the pid of the child it spawned, and
-// that child is the process holding the socket, so no walk is needed and the
-// answer must not depend on a process table being readable at all.
+// foreground: no process table should be needed.
 func TestRunAttributesTheRegisteredPIDItself(t *testing.T) {
 	r := testRegistry(300)
-	r.Register(Record{ID: "a", PID: 300, Group: "itest", Name: "web"})
+	r.Register(Record{ID: "a", Token: "ta", PID: 300, Group: "itest", Name: "web"})
 	r.Parents = func() map[int]int { t.Fatal("the process table should not be needed"); return nil }
 
 	run, ok := r.Run(state.Port{PID: 300})
@@ -122,8 +236,8 @@ func TestRunAttributesTheRegisteredPIDItself(t *testing.T) {
 }
 
 func TestRunUsesTheDirectParentBeforeTheProcessTable(t *testing.T) {
-	r := testRegistry(100)
-	r.Register(Record{ID: "a", PID: 100, Group: "itest", Name: "web"})
+	r := testRegistry(100, 200)
+	r.Register(Record{ID: "a", Token: "ta", PID: 100, Group: "itest", Name: "web"})
 	r.Parents = func() map[int]int { t.Fatal("the process table should not be needed"); return nil }
 
 	if run, ok := r.Run(state.Port{PID: 200, PPID: 100}); !ok || run.Group != "itest" {
@@ -142,73 +256,27 @@ func TestRunFallsBackToTheScannersOwnAttribution(t *testing.T) {
 	}
 }
 
-func TestImportLegacyTakesOverRunsJSON(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-
-	live := os.Getpid()
-	if err := runs.Add(runs.Entry{PID: live, Tag: "legacy", ID: "old-1", Cmd: "npm run dev"}); err != nil {
-		t.Fatal(err)
+// TestPIDGuardBlocksAReusedPID and passes verified and unknown pids.
+func TestPIDGuardBlocksAReusedPID(t *testing.T) {
+	birth1 := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	r := identityRegistry(100, "different", birth1.Add(time.Hour))
+	r.Register(Record{ID: "a", Token: "old-token", PID: 100, Group: "g", Name: "web", Birth: birth1})
+	// Unknown pid passes, stale pid blocked.
+	got := r.PIDGuard([]int{100, 200})
+	if len(got) != 1 || got[0] != 200 {
+		t.Fatalf("PIDGuard = %v, want only pid 200", got)
 	}
-	if _, err := os.Stat(runs.Path()); err != nil {
-		t.Fatalf("runs.json was not written: %v", err)
-	}
-
-	r := New()
-	r.Mirror = false
-	if n := r.ImportLegacy(); n != 1 {
-		t.Fatalf("ImportLegacy = %d, want 1", n)
-	}
-	if _, err := os.Stat(runs.Path()); !os.IsNotExist(err) {
-		t.Fatalf("runs.json survived the import: %v", err)
-	}
-
-	got := r.List()
-	if len(got) != 1 {
-		t.Fatalf("List = %v", got)
-	}
-	// A `sonar run --tag legacy` entry carries no group or name of its own, so
-	// the tag stands for both (the documented alias).
-	if got[0].Group != "legacy" || got[0].Name != "legacy" || got[0].ID != "old-1" {
-		t.Fatalf("imported record = %+v", got[0])
+	if !hasDiag(r, DiagStaleIdentity, 100) {
+		t.Fatalf("no stale_identity diagnostic: %+v", r.Diagnostics())
 	}
 }
 
-func TestImportLegacyRewritesTheFileItOwns(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-
-	live := os.Getpid()
-	if err := runs.Add(runs.Entry{PID: live, Tag: "legacy", ID: "old-1"}); err != nil {
-		t.Fatal(err)
+// hasDiag reports whether r carries a code diagnostic for pid.
+func hasDiag(r *Registry, code string, pid int) bool {
+	for _, d := range r.Diagnostics() {
+		if d.Code == code && d.PID == pid {
+			return true
+		}
 	}
-
-	r := New() // mirroring on: the daemon owns the file from here
-	if n := r.ImportLegacy(); n != 1 {
-		t.Fatalf("ImportLegacy = %d, want 1", n)
-	}
-	data, err := os.ReadFile(runs.Path())
-	if err != nil {
-		t.Fatalf("the daemon did not rewrite runs.json: %v", err)
-	}
-	var file struct {
-		Runs map[string]runs.Entry `json:"runs"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		t.Fatal(err)
-	}
-	entry, ok := file.Runs[itoa(live)]
-	if !ok {
-		t.Fatalf("runs.json = %s", data)
-	}
-	if entry.Group != "legacy" || entry.Name != "legacy" {
-		t.Fatalf("mirrored entry = %+v", entry)
-	}
-}
-
-func itoa(i int) string {
-	b, _ := json.Marshal(i)
-	return string(b)
+	return false
 }

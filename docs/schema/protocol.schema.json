@@ -3070,6 +3070,12 @@
         "id": {
           "type": "string"
         },
+        "token": {
+          "type": "string"
+        },
+        "birth": {
+          "type": "string"
+        },
         "session": {
           "$ref": "#/definitions/Session"
         },

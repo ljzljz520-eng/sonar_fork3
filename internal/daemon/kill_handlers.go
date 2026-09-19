@@ -44,6 +44,10 @@ func handlePortsKill(ctx context.Context, req *Request) (any, error) {
 		}
 		targets = append(targets, t)
 	}
+	// Verify PID-addressed targets before marking or signaling: a reused PID
+	// is blocked with a stale_identity row.
+	var blocked []state.KillResult
+	targets, blocked = guardPIDTargets(req.Runtime.Runs(), targets)
 
 	opts := killer.Options{
 		Tree:     p.Tree,
@@ -59,6 +63,7 @@ func handlePortsKill(ctx context.Context, req *Request) (any, error) {
 		req.Runtime.Runs().Stopping(runRoots(snap, targets))
 	}
 	rows := killer.KillPorts(ctx, targets, opts)
+	rows = append(blocked, rows...)
 	afterKill(req, opts.DryRun)
 	return killEnvelope(rows), nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/raskrebs/sonar/internal/daemon"
 	"github.com/raskrebs/sonar/internal/daemon/rpc"
+	"github.com/raskrebs/sonar/internal/runs"
 	"github.com/raskrebs/sonar/internal/scanner"
 	"github.com/raskrebs/sonar/internal/sessions"
 	"github.com/raskrebs/sonar/internal/spawn"
@@ -36,7 +37,12 @@ func init() {
 	daemon.OnGroupRename(func(renames map[string]string) { Default.RenameGroups(renames) })
 
 	daemon.OnStart(func(rt *daemon.Runtime) {
-		if n := Default.ImportLegacy(); n > 0 {
+		// Start from a clean slate, recover the durable state (snapshot +
+		// journal), and import a legacy runs.json; only identity-matching
+		// processes are taken over.
+		Default.Reset()
+		n := Default.Open()
+		if n > 0 {
 			rt.Logger.Info("imported runs.json into the run registry", "runs", n)
 		}
 		rt.SetRuns(Default)
@@ -95,6 +101,8 @@ func handleRegister(_ context.Context, req *daemon.Request) (any, error) {
 		Name:  strings.TrimSpace(p.Name),
 		Cmd:   p.Cmd,
 		Cwd:   cwd,
+		Token: p.Token,
+		Birth: runs.ParseTime(p.Birth),
 	}
 	if p.ID != nil {
 		rec.ID = *p.ID
@@ -114,6 +122,12 @@ func handleRegister(_ context.Context, req *daemon.Request) (any, error) {
 	rec.Origin = Origin(req)
 
 	rec = Default.Register(rec)
+	if rec.Token == "" {
+		// A journal crash point refused the commit; report it rather than
+		// returning an empty id.
+		return nil, rpc.NewError(rpc.CodeInternal, "could not persist the run registration",
+			"retry runs.register")
+	}
 	rememberSession(req.Runtime, rec.Session)
 	req.Runtime.Logger.Debug("run registered",
 		"id", rec.ID, "pid", rec.PID, "group", rec.Group, "name", rec.Name)
@@ -231,8 +245,9 @@ func Spawn(ctx context.Context, rt *daemon.Runtime, req spawn.Request, meta Meta
 			"check the command and its working directory")
 	}
 
-	Default.Register(Record{
+	rec := Default.Register(Record{
 		ID:         h.ID,
+		Token:      h.Token,
 		PID:        h.PID,
 		PPID:       h.PPID,
 		Group:      h.Group,
@@ -241,6 +256,7 @@ func Spawn(ctx context.Context, rt *daemon.Runtime, req spawn.Request, meta Meta
 		Cwd:        h.Cwd,
 		PortHint:   h.PortHint,
 		StartedAt:  h.StartedAt,
+		Birth:      h.Birth,
 		Session:    h.Session,
 		ConfigPath: meta.ConfigPath,
 		StartID:    meta.StartID,
@@ -248,6 +264,10 @@ func Spawn(ctx context.Context, rt *daemon.Runtime, req spawn.Request, meta Meta
 		LogPath:    h.LogPath,
 		LogOffset:  h.LogOffset,
 	})
+	if rec.Token == "" {
+		return nil, rpc.NewError(rpc.CodeInternal, "the run started but its registration did not commit",
+			"the child is running; retry runs.register with the same token to take it over")
+	}
 	rememberSession(rt, h.Session)
 	rt.Logger.Info("spawned a run",
 		"id", h.ID, "pid", h.PID, "group", h.Group, "name", h.Name, "log", h.LogPath)
